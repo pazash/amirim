@@ -1,0 +1,7 @@
+.venv/
+weather_data/
+ewb_forecasts/
+__pycache__/
+*.docx
+*.pt
+evaluations.csv

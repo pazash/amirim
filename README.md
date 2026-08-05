@@ -1,6 +1,6 @@
 # Amirim Earth Foundation Model Finetuning
 
-This repository contains the codebase for a bachelor's degree project in Computer Science and Earth Science. 
+This repository contains the codebase for Amirim project in Computer Science and Earth Science. 
 The core idea is to take an Earth foundation model (Aurora 1.5) and finetune it on a dataset with extreme oversampling to evaluate its performance in predicting extreme weather events, specifically heatwaves.
 
 ## Project Structure

@@ -61,7 +61,7 @@ def generate_heatwave_forecasts(output_dir="ewb_forecasts/"):
     heatwave_cases = [case for case in all_cases if case.event_type == "heat_wave"]
     
     # We define the lead times we want to evaluate to the START of the event
-    target_start_lead_times = [6, 24, 72, 120] 
+    target_start_lead_times = [24, 72, 120] 
     
     for case in heatwave_cases:
 

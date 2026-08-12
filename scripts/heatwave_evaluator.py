@@ -17,9 +17,16 @@ os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "false"
 os.environ["GCSFS_TOKEN"] = "anon"
 
 import logging
+import re
 import sys
+import warnings
 from pathlib import Path
 from typing import Any, Optional
+
+# Suppress harmless divide-by-zero warnings from dask/xarray
+# that occur when xr.where() evaluates both branches before masking.
+warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
 
 import aiohttp
 import numpy as np
@@ -108,8 +115,13 @@ class ConditionalBiasOfExtremes(ewb.BaseMetric):
         self, forecast: xr.DataArray, target: xr.DataArray, **kwargs: Any
     ) -> xr.DataArray:
         """Compute mean bias at grid points where target >= Qxx percentile."""
-        # Use xarray's native quantile to avoid loading the entire array into memory at once
+        # Guard against all-NaN slices (e.g., lead times with no forecast data)
+        if target.isnull().all():
+            return xr.DataArray(np.nan)
+
         threshold = float(target.quantile(self.percentile / 100.0, skipna=True))
+        if np.isnan(threshold):
+            return xr.DataArray(np.nan)
 
         # Optimization: Subtract first, then apply .where() once to save memory and time
         bias = forecast - target
@@ -162,7 +174,9 @@ class IntersectionOverUnion(ewb.ThresholdMetric):
         fn = counts["fn_count"]
 
         union = tp + fp + fn
-        return xr.where(union > 0, tp / union, 0.0)
+        # Return NaN (not 0.0) when union==0, so we can distinguish "no spatial
+        # overlap" from "no forecast data at this lead time".
+        return xr.where(union > 0, tp / union, np.nan)
 
 
 class ExtremeAreaRatio(ewb.BaseMetric):
@@ -190,7 +204,13 @@ class ExtremeAreaRatio(ewb.BaseMetric):
         self, forecast: xr.DataArray, target: xr.DataArray, **kwargs: Any
     ) -> xr.DataArray:
         """Compute ratio of extreme-area grid point counts."""
+        # Guard against all-NaN slices
+        if target.isnull().all():
+            return xr.DataArray(np.nan)
+
         threshold = float(target.quantile(self.percentile / 100.0, skipna=True))
+        if np.isnan(threshold):
+            return xr.DataArray(np.nan)
 
         spatial_dims = [d for d in forecast.dims if d in ("latitude", "longitude")]
 
@@ -213,17 +233,23 @@ class ExtremeAreaRatio(ewb.BaseMetric):
 # =============================================================================
 
 
-def load_aurora_forecast(forecast_dir: str = "ewb_forecasts") -> ewb.XarrayForecast:
-    """Load Aurora 1.5 forecast NetCDF files into an EWB XarrayForecast.
+def load_aurora_forecasts(forecast_dir: str = "ewb_forecasts") -> list:
+    """Load Aurora 1.5 forecast NC files, one XarrayForecast per file.
 
-    Uses chunked loading via open_mfdataset to avoid loading all data into
-    memory at once. EWB will subset to individual cases during evaluation.
+    Each NC file represents a single forecast run with one init_time and
+    one lead-time-to-onset bucket (L24, L72, or L120). Loading them
+    individually avoids the NaN-padding bug caused by concatenating files
+    with mismatched lead_time ranges via open_mfdataset.
+
+    The lead-time bucket is parsed from the filename (e.g., "_L120_") and
+    embedded in the forecast name so the output CSV distinguishes results
+    by initialization offset ("aurora1.5_L24", "aurora1.5_L72", etc.).
 
     Args:
         forecast_dir: Path to the directory containing the .nc files.
 
     Returns:
-        An ewb.XarrayForecast wrapping the concatenated dataset.
+        List of ewb.XarrayForecast objects, one per NC file.
     """
     forecast_path = Path(forecast_dir)
     nc_files = sorted(list(forecast_path.glob("*.nc")))
@@ -236,23 +262,28 @@ def load_aurora_forecast(forecast_dir: str = "ewb_forecasts") -> ewb.XarrayForec
 
     logger.info(f"Found {len(nc_files)} forecast files in {forecast_path}")
 
-    # Use chunked loading to keep memory usage low.
-    # chunks={"init_time": 1} processes one init_time at a time.
-    ds = xr.open_mfdataset(
-        nc_files,
-        combine="nested",
-        concat_dim="init_time",
-        compat="override",
-        coords="minimal",
-        chunks={"init_time": 1},
-    )
+    forecasts = []
+    for nc_file in nc_files:
+        # Parse lead-time-to-onset bucket from filename (e.g., "L24", "L72", "L120")
+        match = re.search(r"_L(\d+)_", nc_file.name)
+        lead_bucket = f"L{match.group(1)}" if match else "L?"
 
-    return ewb.XarrayForecast(
-        ds=ds,
-        name="aurora1.5",
-        variables=["surface_air_temperature"],
-        variable_mapping={"2t_aurora": "surface_air_temperature"},
+        # Load lazily with dask to keep memory low.
+        ds = xr.open_dataset(nc_file, chunks={"lead_time": -1})
+
+        forecast = ewb.XarrayForecast(
+            ds=ds,
+            name=f"aurora1.5_{lead_bucket}",
+            variables=["surface_air_temperature"],
+            variable_mapping={"2t_aurora": "surface_air_temperature"},
+        )
+        forecasts.append(forecast)
+
+    logger.info(
+        f"Created {len(forecasts)} individual Aurora forecasts "
+        f"(each with its own init_time and self-consistent lead_time range)"
     )
+    return forecasts
 
 
 def setup_hres_baseline() -> ewb.ZarrForecast:
@@ -329,17 +360,18 @@ def build_metric_list() -> list:
 
 
 def build_evaluation_objects(
-    aurora_forecast: ewb.XarrayForecast,
+    aurora_forecasts: list,
     hres_forecast: ewb.ZarrForecast,
     era5_target: ewb.ERA5,
 ) -> list:
-    """Create EvaluationObject list for both Aurora 1.5 and HRES.
+    """Create EvaluationObject list for Aurora 1.5 and HRES.
 
-    Each EvaluationObject evaluates ONE forecast against ONE target using the
-    full metric list. EWB runs each case × metric combination internally.
+    One EvaluationObject is created per Aurora NC file (each with its own
+    init_time and lead_time range) plus one for HRES. EWB matches each
+    forecast against the cases whose time windows it covers.
 
     Args:
-        aurora_forecast: Aurora 1.5 XarrayForecast.
+        aurora_forecasts: List of Aurora 1.5 XarrayForecast objects.
         hres_forecast: HRES ZarrForecast.
         era5_target: ERA5 verification target.
 
@@ -348,27 +380,37 @@ def build_evaluation_objects(
     """
     metric_list = build_metric_list()
 
-    return [
-        ewb.EvaluationObject(
-            event_type="heat_wave",
-            metric_list=metric_list,
-            target=era5_target,
-            forecast=aurora_forecast,
-        ),
+    eval_objects = []
+
+    # One EvaluationObject per Aurora forecast file
+    for forecast in aurora_forecasts:
+        eval_objects.append(
+            ewb.EvaluationObject(
+                event_type="heat_wave",
+                metric_list=metric_list,
+                target=era5_target,
+                forecast=forecast,
+            )
+        )
+
+    # One EvaluationObject for HRES (covers all cases via its cloud zarr store)
+    eval_objects.append(
         ewb.EvaluationObject(
             event_type="heat_wave",
             metric_list=metric_list,
             target=era5_target,
             forecast=hres_forecast,
         ),
-    ]
+    )
+
+    return eval_objects
 
 
 def run_evaluation(output_csv: str = "heatwave_evaluations.csv"):
     """Main entry point: load data, run EWB evaluation, save CSV.
 
     Memory-efficiency notes:
-        - Aurora NC files are loaded with dask chunks (init_time=1).
+        - Each Aurora NC file is loaded individually with dask chunks.
         - HRES and ERA5 are loaded lazily from cloud zarr stores.
         - EWB evaluates case-by-case internally, subsetting before computing.
         - Results are accumulated as lightweight DataFrames.
@@ -381,8 +423,8 @@ def run_evaluation(output_csv: str = "heatwave_evaluations.csv"):
     logger.info("=" * 60)
 
     # --- Load forecasts ---
-    logger.info("Loading Aurora 1.5 forecasts...")
-    aurora_forecast = load_aurora_forecast("ewb_forecasts")
+    logger.info("Loading Aurora 1.5 forecasts (one per NC file)...")
+    aurora_forecasts = load_aurora_forecasts("ewb_forecasts")
 
     logger.info("Configuring HRES baseline...")
     hres_forecast = setup_hres_baseline()
@@ -392,8 +434,9 @@ def run_evaluation(output_csv: str = "heatwave_evaluations.csv"):
     era5_target = setup_era5_target()
 
     # --- Build evaluation objects ---
-    logger.info("Building evaluation objects with 5 metrics × 2 forecasts...")
-    eval_objects = build_evaluation_objects(aurora_forecast, hres_forecast, era5_target)
+    n_aurora = len(aurora_forecasts)
+    logger.info(f"Building evaluation objects: {n_aurora} Aurora files + 1 HRES, 5 metrics each...")
+    eval_objects = build_evaluation_objects(aurora_forecasts, hres_forecast, era5_target)
 
     # --- Load EWB case metadata ---
     logger.info("Loading EWB case metadata...")

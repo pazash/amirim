@@ -216,48 +216,7 @@ Lean, 2008).
 
 ---
 
-#### 4.2.2 Fractions Skill Score (FSS)
-
-**Purpose**: Assess the spatial scale at which the forecast becomes
-"useful" by comparing the fractional coverage of extreme events within
-neighbourhoods of increasing size. FSS avoids the "double-penalty" problem
-inherent in point-wise metrics: a small spatial displacement in an intense
-forecast scores poorly in RMSE but well in FSS at appropriate scales.
-
-**Definition**: For a given neighbourhood radius _r_ (in grid points):
-
-```
-FSS(τ, r) = 1 − [ Σ_s (O_r(s) − F_r(s))² ] / [ Σ_s O_r(s)² + Σ_s F_r(s)² ]
-```
-
-where:
-- `F_r(s)` = fraction of grid points within a (2r+1)×(2r+1) box centred on
-  _s_ where the forecast exceeds Q_p
-- `O_r(s)` = same, for the observation
-
-**Neighbourhood radii**: We evaluate at r ∈ {1, 3, 5, 10, 20} grid points,
-corresponding to approximately {25 km, 75 km, 125 km, 250 km, 500 km}
-at 0.25° resolution.
-
-**Uniform skill threshold** (Roberts and Lean, 2008):
-
-```
-FSS_uniform = 0.5 + f_o / 2
-```
-
-where `f_o` is the observed fraction of extreme grid points in the domain.
-A model is considered "useful" at scale _r_ when FSS(r) ≥ FSS_uniform.
-
-**Threshold**: Same Q_p as for IoU (90th percentile for heat, 95th for precip).
-
-**Literature basis**: FSS is the standard spatial verification score for
-high-resolution precipitation (Roberts and Lean, 2008, _Monthly Weather
-Review_; Mittermaier _et al._, 2013). It is increasingly applied to
-temperature extremes (Ebert, 2008).
-
----
-
-#### 4.2.3 Extreme Area Ratio (EAR)
+#### 4.2.2 Extreme Area Ratio (EAR)
 
 **Purpose**: Quantify whether the model predicts the correct _total area_
 of the extreme event, independent of exact location.
@@ -291,8 +250,7 @@ are recommended for extreme precipitation evaluation.
 | 2 | Conditional Bias of Extremes (CBE) | Amplitude | 2t / tp | Mean bias at extreme grid points | `BaseMetric` |
 | 3 | RMSE | Amplitude (baseline) | 2t / tp | Global domain error | `BaseMetric` (built-in) |
 | 4 | Intersection over Union (IoU/CSI) | Spatial | 2t / tp | Binary footprint overlap | `ThresholdMetric` |
-| 5 | Fractions Skill Score (FSS) | Spatial | 2t / tp | Scale-dependent spatial skill | `BaseMetric` |
-| 6 | Extreme Area Ratio (EAR) | Spatial | 2t / tp | Total extreme area bias | `BaseMetric` |
+| 5 | Extreme Area Ratio (EAR) | Spatial | 2t / tp | Total extreme area bias | `BaseMetric` |
 
 ---
 
@@ -360,7 +318,6 @@ For each event case _c_ in the EWB case list:
 | **ERA5** | ECMWF Reanalysis v5, used as verification truth |
 | **2t** | 2-metre temperature |
 | **tp** | Total precipitation |
-| **FSS** | Fractions Skill Score |
 | **IoU** | Intersection over Union |
 | **CSI** | Critical Success Index (= IoU for binary events) |
 | **PAE** | Peak Amplitude Error |

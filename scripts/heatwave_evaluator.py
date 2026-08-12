@@ -2,9 +2,9 @@
 Heatwave Evaluation Pipeline using ExtremeWeatherBench (EWB).
 
 Evaluates Aurora 1.5 and HRES forecasts against ERA5 reanalysis for heatwave
-cases using 6 metrics:
+cases using 5 metrics:
   - 3 Amplitude: Peak Amplitude Error (PAE), Conditional Bias of Extremes (CBE), RMSE
-  - 3 Spatial:   Intersection over Union (IoU/CSI), Fractions Skill Score (FSS),
+  - 2 Spatial:   Intersection over Union (IoU/CSI),
                  Extreme Area Ratio (EAR)
 
 Usage:
@@ -25,7 +25,6 @@ import aiohttp
 import numpy as np
 import pandas as pd
 import xarray as xr
-from scipy.ndimage import uniform_filter
 
 import extremeweatherbench as ewb
 
@@ -109,16 +108,12 @@ class ConditionalBiasOfExtremes(ewb.BaseMetric):
         self, forecast: xr.DataArray, target: xr.DataArray, **kwargs: Any
     ) -> xr.DataArray:
         """Compute mean bias at grid points where target >= Qxx percentile."""
-        # Compute the threshold from the target — must call .values to get numpy
-        # for np.nanpercentile, but only on the spatial slice to keep memory low
-        threshold = float(np.nanpercentile(target.values, self.percentile))
+        # Use xarray's native quantile to avoid loading the entire array into memory at once
+        threshold = float(target.quantile(self.percentile / 100.0, skipna=True))
 
-        # Mask: keep only grid points where target meets the extreme criterion
-        extreme_mask = target >= threshold
-        forecast_masked = forecast.where(extreme_mask)
-        target_masked = target.where(extreme_mask)
-
-        bias = forecast_masked - target_masked
+        # Optimization: Subtract first, then apply .where() once to save memory and time
+        bias = forecast - target
+        bias = bias.where(target >= threshold)
 
         # Average over all dims except preserve_dims
         reduce_dims = [d for d in bias.dims if d != self.preserve_dims]
@@ -151,7 +146,7 @@ class IntersectionOverUnion(ewb.ThresholdMetric):
         self, forecast: xr.DataArray, target: xr.DataArray, **kwargs: Any
     ) -> xr.DataArray:
         """Compute IoU with threshold set to target's Qxx percentile."""
-        dynamic_threshold = float(np.nanpercentile(target.values, self.percentile))
+        dynamic_threshold = float(target.quantile(self.percentile / 100.0, skipna=True))
 
         transformed = self.transformed_contingency_manager(
             forecast=forecast,
@@ -168,105 +163,6 @@ class IntersectionOverUnion(ewb.ThresholdMetric):
 
         union = tp + fp + fn
         return xr.where(union > 0, tp / union, 0.0)
-
-
-class FractionsSkillScore(ewb.BaseMetric):
-    """Fractions Skill Score (FSS) at a configurable neighbourhood radius.
-
-    FSS is a neighbourhood-based verification metric that solves the
-    "double-penalty" problem of point-wise metrics (Roberts & Lean, 2008).
-    Instead of comparing grid points 1:1, it compares the fraction of grid
-    points exceeding a threshold within a neighbourhood window.
-
-    FSS = 1 - MSE(O_frac, F_frac) / (mean(O_frac²) + mean(F_frac²))
-
-    The threshold is computed dynamically (90th percentile from target).
-    Standard radii: r=5 (≈125 km at 0.25° resolution) is the most commonly
-    reported single-scale FSS in the literature. Additional scales at r=1
-    (local) and r=10 (synoptic) are useful for scale-dependent analysis.
-
-    This metric is not available in EWB or the `scores` library and must be
-    implemented from scratch using scipy.ndimage.uniform_filter.
-    """
-
-    def __init__(
-        self,
-        radius: int = 5,
-        percentile: float = 90.0,
-        name: Optional[str] = None,
-        **kwargs,
-    ):
-        if name is None:
-            name = f"FSS_r{radius}"
-        super().__init__(name=name, **kwargs)
-        self.radius = radius
-        self.percentile = percentile
-
-    def _compute_metric(
-        self, forecast: xr.DataArray, target: xr.DataArray, **kwargs: Any
-    ) -> xr.DataArray:
-        """Compute FSS at the configured neighbourhood radius."""
-        threshold = float(np.nanpercentile(target.values, self.percentile))
-
-        # Binarise
-        binary_fcst = (forecast >= threshold).astype(float)
-        binary_obs = (target >= threshold).astype(float)
-
-        # Determine which dims are lat/lon
-        spatial_dims = [d for d in forecast.dims if d in ("latitude", "longitude")]
-        non_spatial_dims = [d for d in forecast.dims if d not in spatial_dims]
-
-        # We compute FSS per non-spatial slice (lead_time, init_time, etc.)
-        # and then aggregate
-        window_size = 2 * self.radius + 1
-
-        fss_values = []
-        # Stack non-spatial dims for iteration to keep memory usage low
-        if non_spatial_dims:
-            stacked = binary_fcst.stack(sample=non_spatial_dims)
-            stacked_obs = binary_obs.stack(sample=non_spatial_dims)
-
-            for i in range(stacked.sizes["sample"]):
-                f_slice = stacked.isel(sample=i).values
-                o_slice = stacked_obs.isel(sample=i).values
-
-                # Replace NaN with 0 for the filter
-                f_clean = np.nan_to_num(f_slice, nan=0.0)
-                o_clean = np.nan_to_num(o_slice, nan=0.0)
-
-                # Compute neighbourhood fractions using uniform (box) filter
-                f_frac = uniform_filter(f_clean, size=window_size, mode="constant")
-                o_frac = uniform_filter(o_clean, size=window_size, mode="constant")
-
-                # FSS formula
-                mse = np.nanmean((f_frac - o_frac) ** 2)
-                ref = np.nanmean(f_frac**2) + np.nanmean(o_frac**2)
-
-                fss_val = 1.0 - mse / ref if ref > 0 else 0.0
-                fss_values.append(fss_val)
-
-            # Unstack back to original non-spatial coords
-            result = xr.DataArray(
-                fss_values,
-                coords=stacked.coords["sample"],
-                dims="sample",
-            ).unstack("sample")
-        else:
-            # Single spatial field — compute directly
-            f_clean = np.nan_to_num(binary_fcst.values, nan=0.0)
-            o_clean = np.nan_to_num(binary_obs.values, nan=0.0)
-            f_frac = uniform_filter(f_clean, size=window_size, mode="constant")
-            o_frac = uniform_filter(o_clean, size=window_size, mode="constant")
-            mse = np.nanmean((f_frac - o_frac) ** 2)
-            ref = np.nanmean(f_frac**2) + np.nanmean(o_frac**2)
-            fss_val = 1.0 - mse / ref if ref > 0 else 0.0
-            result = xr.DataArray(fss_val)
-
-        # Reduce any dims except preserve_dims
-        reduce_dims = [d for d in result.dims if d != self.preserve_dims]
-        if reduce_dims:
-            result = result.mean(dim=reduce_dims)
-        return result
 
 
 class ExtremeAreaRatio(ewb.BaseMetric):
@@ -294,7 +190,7 @@ class ExtremeAreaRatio(ewb.BaseMetric):
         self, forecast: xr.DataArray, target: xr.DataArray, **kwargs: Any
     ) -> xr.DataArray:
         """Compute ratio of extreme-area grid point counts."""
-        threshold = float(np.nanpercentile(target.values, self.percentile))
+        threshold = float(target.quantile(self.percentile / 100.0, skipna=True))
 
         spatial_dims = [d for d in forecast.dims if d in ("latitude", "longitude")]
 
@@ -408,15 +304,14 @@ VAR_KWARGS = {
 
 
 def build_metric_list() -> list:
-    """Build the list of all 6 metrics.
+    """Build the list of all 5 metrics.
 
     Metrics:
         1. PAE  — Peak Amplitude Error (custom, BaseMetric)
         2. CBE  — Conditional Bias of Extremes (custom, BaseMetric)
         3. RMSE — Root Mean Squared Error (built-in ewb.metrics.RootMeanSquaredError)
         4. IoU  — Intersection over Union / CSI (custom ThresholdMetric with dynamic Q90)
-        5. FSS  — Fractions Skill Score at r=5 (custom, BaseMetric) — standard single-scale
-        6. EAR  — Extreme Area Ratio (custom, BaseMetric)
+        5. EAR  — Extreme Area Ratio (custom, BaseMetric)
 
     Returns:
         List of metric instances.
@@ -428,7 +323,6 @@ def build_metric_list() -> list:
         ewb.metrics.RootMeanSquaredError(**VAR_KWARGS),
         # --- Spatial Extent Metrics ---
         IntersectionOverUnion(percentile=90.0, **VAR_KWARGS),
-        FractionsSkillScore(radius=5, percentile=90.0, **VAR_KWARGS),
         ExtremeAreaRatio(percentile=90.0, **VAR_KWARGS),
     ]
     return metrics
@@ -498,7 +392,7 @@ def run_evaluation(output_csv: str = "heatwave_evaluations.csv"):
     era5_target = setup_era5_target()
 
     # --- Build evaluation objects ---
-    logger.info("Building evaluation objects with 6 metrics × 2 forecasts...")
+    logger.info("Building evaluation objects with 5 metrics × 2 forecasts...")
     eval_objects = build_evaluation_objects(aurora_forecast, hres_forecast, era5_target)
 
     # --- Load EWB case metadata ---

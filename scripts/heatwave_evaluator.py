@@ -97,6 +97,15 @@ def extreme_area_ratio(
 # =============================================================================
 
 
+def standardize_longitude(ds: xr.Dataset) -> xr.Dataset:
+    """Standardize dataset longitude to [0, 360] and sort coordinates."""
+    if "longitude" in ds.coords:
+        new_lon = ds["longitude"] % 360
+        ds = ds.assign_coords(longitude=new_lon)
+        ds = ds.sortby("longitude")
+    return ds
+
+
 def load_era5_zarr() -> xr.Dataset:
     """Load ARCO ERA5 zarr store. Returns the full lazy dataset."""
     logger.info("Connecting to ARCO ERA5 zarr store...")
@@ -105,7 +114,8 @@ def load_era5_zarr() -> xr.Dataset:
         storage_options={"token": "anon"},
     )
     # ERA5 ARCO variables
-    ds = ds.rename({"temperature_2m": "surface_air_temperature"})
+    ds = ds.rename({"2m_temperature": "surface_air_temperature"})
+    ds = standardize_longitude(ds)
     return ds[["surface_air_temperature"]]
 
 
@@ -123,6 +133,7 @@ def load_hres_zarr() -> xr.Dataset:
             "time": "init_time",
         }
     )
+    ds = standardize_longitude(ds)
     return ds[["surface_air_temperature"]]
 
 
@@ -185,9 +196,9 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
         logger.info(f"  Time: {case.start_date} to {case.end_date}")
         logger.info(f"  Location: {case.location}")
 
-        # Ensure location is a BoundingBox for this simple pipeline
-        if not isinstance(case.location, ewb.regions.BoundingBox):
-            logger.warning(f"  Skipping case {case.case_id_number} (not a BoundingBox).")
+        # Ensure location is a BoundingBoxRegion for this simple pipeline
+        if not isinstance(case.location, ewb.regions.BoundingBoxRegion):
+            logger.warning(f"  Skipping case {case.case_id_number} (not a BoundingBoxRegion).")
             continue
 
         # Valid times for this case (typically 6-hourly or 12-hourly for HRES)
@@ -261,6 +272,8 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
             
             # Load the single Aurora forecast file
             aurora_fcst = xr.open_dataset(nc_file)
+            aurora_fcst = standardize_longitude(aurora_fcst)
+            
             if "2t_aurora" in aurora_fcst.data_vars:
                 aurora_var = "2t_aurora"
             else:

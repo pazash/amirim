@@ -115,7 +115,6 @@ def load_era5_zarr() -> xr.Dataset:
     )
     # ERA5 ARCO variables
     ds = ds.rename({"2m_temperature": "surface_air_temperature"})
-    ds = standardize_longitude(ds)
     return ds[["surface_air_temperature"]]
 
 
@@ -133,7 +132,6 @@ def load_hres_zarr() -> xr.Dataset:
             "time": "init_time",
         }
     )
-    ds = standardize_longitude(ds)
     return ds[["surface_air_temperature"]]
 
 
@@ -152,9 +150,14 @@ def get_aurora_files(forecast_dir: str = "ewb_forecasts") -> list[Path]:
 def align_and_subset_2d(
     fcst_da: xr.DataArray,
     tgt_da: xr.DataArray,
-    bbox: "ewb.regions.BoundingBox",
+    bbox: "ewb.regions.BoundingBoxRegion",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Subset arrays to the bounding box and ensure grids perfectly align."""
+    # Standardize longitudes to [0, 360] on the small 2D slices before masking/aligning
+    # This prevents massive Dask graph building/sorting that causes OOM on full datasets
+    fcst_da = standardize_longitude(fcst_da)
+    tgt_da = standardize_longitude(tgt_da)
+
     # Subset target to bbox (EWB target spatial masking logic)
     tgt_sub = bbox.mask(tgt_da, drop=True)
     
@@ -272,7 +275,6 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
             
             # Load the single Aurora forecast file
             aurora_fcst = xr.open_dataset(nc_file)
-            aurora_fcst = standardize_longitude(aurora_fcst)
             
             if "2t_aurora" in aurora_fcst.data_vars:
                 aurora_var = "2t_aurora"

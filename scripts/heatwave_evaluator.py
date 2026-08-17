@@ -199,67 +199,15 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
         # HRES has 12h resolution, ERA5 has 1h/6h, Aurora has 6h. 
         # We evaluate at every forecast valid_time that falls within the case window.
 
-        # --- A. Download Case Data ---
+        # --- A. Download ERA5 Case Data ---
         logger.info("  Downloading ERA5 subset for this case...")
         era5_case = era5_ds.sel(time=slice(case.start_date, case.end_date))
         # Mask spatially, download to memory, then standardize
         era5_case = case.location.mask(era5_case).compute()
         era5_case = standardize_longitude(era5_case)
 
-        logger.info("  Downloading HRES subset for this case...")
-        hres_init_start = pd.to_datetime(case.start_date) - pd.Timedelta(days=15)
-        hres_init_end = pd.to_datetime(case.end_date)
-        
-        try:
-            hres_case = hres_ds.sel(init_time=slice(hres_init_start, hres_init_end))
-            hres_case = case.location.mask(hres_case).compute()
-            hres_case = standardize_longitude(hres_case)
-        except Exception as e:
-            logger.warning(f"  Could not subset HRES for case {case.case_id_number}: {e}")
-            hres_case = None
-
-        # --- B. Evaluate HRES ---
-        logger.info("  Evaluating HRES...")
-        if hres_case is not None and len(hres_case.init_time) > 0:
-            for init_t in hres_case.init_time.values:
-                fcst_init = hres_case.sel(init_time=init_t)
-                
-                for lt in fcst_init.lead_time.values:
-                    valid_time = init_t + lt
-                    if pd.to_datetime(case.start_date) <= pd.to_datetime(valid_time) <= pd.to_datetime(case.end_date):
-                        fcst_2d = fcst_init["surface_air_temperature"].sel(lead_time=lt)
-                        try:
-                            tgt_2d = era5_case["surface_air_temperature"].sel(time=valid_time)
-                        except KeyError:
-                            continue
-                        
-                        fcst_arr, tgt_arr = align_and_subset_2d(fcst_2d, tgt_2d)
-                        
-                        metrics_computed = {
-                            "Peak_Amplitude_Error": peak_amplitude_error(fcst_arr, tgt_arr),
-                            "Conditional_Bias_Extremes": conditional_bias_extremes(fcst_arr, tgt_arr),
-                            "RootMeanSquaredError": rmse(fcst_arr, tgt_arr),
-                            "Spatial_IOU": intersection_over_union(fcst_arr, tgt_arr),
-                            "Extreme_Area_Ratio": extreme_area_ratio(fcst_arr, tgt_arr),
-                        }
-                        
-                        for metric_name, value in metrics_computed.items():
-                            results.append({
-                                "case_id_number": case.case_id_number,
-                                "event_type": "heat_wave",
-                                "forecast_source": "HRES",
-                                "target_source": "ERA5",
-                                "metric": metric_name,
-                                "forecast_variable": "surface_air_temperature",
-                                "target_variable": "surface_air_temperature",
-                                "init_time": init_t,
-                                "valid_time": valid_time,
-                                "lead_time": lt,
-                                "value": value
-                            })
-                            
-        # --- C. Evaluate Aurora ---
-        logger.info("  Evaluating Aurora...")
+        # --- B. Evaluate Aurora & Matched HRES ---
+        logger.info("  Evaluating Aurora and Matched HRES...")
         for nc_file in aurora_files:
             match = re.search(r"_L(\d+)_", nc_file.name)
             lead_bucket = f"L{match.group(1)}" if match else "L?"
@@ -276,41 +224,90 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
                 aurora_var = [v for v in aurora_fcst.data_vars if v != "latitude" and v != "longitude"][0]
             
             init_t = aurora_fcst.init_time.values[0]
+            
+            # Fetch matching HRES for this exact init_time (all its lead times)
+            try:
+                # We use nearest within 1 hour in case of minor timestamp discrepancies
+                hres_fcst = hres_ds.sel(init_time=init_t, method="nearest", tolerance=pd.Timedelta("1h"))
+                hres_fcst = case.location.mask(hres_fcst).compute()
+                hres_fcst = standardize_longitude(hres_fcst)
+                has_hres = True
+            except KeyError:
+                has_hres = False
+                logger.info(f"  No matching HRES found for init_time {init_t}")
+
             for lt in aurora_fcst.lead_time.values:
                 valid_time = init_t + lt
                 
+                # Convert lead_time to total seconds as an integer
+                lt_seconds = int(pd.Timedelta(lt).total_seconds())
+                
+                # Only evaluate if valid_time is inside the case window
                 if pd.to_datetime(case.start_date) <= pd.to_datetime(valid_time) <= pd.to_datetime(case.end_date):
-                    fcst_2d = aurora_fcst[aurora_var].sel(init_time=init_t, lead_time=lt)
-                    
                     try:
                         tgt_2d = era5_case["surface_air_temperature"].sel(time=valid_time)
                     except KeyError:
                         continue
                     
-                    fcst_arr, tgt_arr = align_and_subset_2d(fcst_2d, tgt_2d)
+                    # 1. Evaluate Aurora
+                    fcst_2d_aurora = aurora_fcst[aurora_var].sel(init_time=init_t, lead_time=lt)
+                    fcst_arr_aurora, tgt_arr_aurora = align_and_subset_2d(fcst_2d_aurora, tgt_2d)
                     
-                    metrics_computed = {
-                        "Peak_Amplitude_Error": peak_amplitude_error(fcst_arr, tgt_arr),
-                        "Conditional_Bias_Extremes": conditional_bias_extremes(fcst_arr, tgt_arr),
-                        "RootMeanSquaredError": rmse(fcst_arr, tgt_arr),
-                        "Spatial_IOU": intersection_over_union(fcst_arr, tgt_arr),
-                        "Extreme_Area_Ratio": extreme_area_ratio(fcst_arr, tgt_arr),
+                    metrics_aurora = {
+                        "Peak_Amplitude_Error": peak_amplitude_error(fcst_arr_aurora, tgt_arr_aurora),
+                        "Conditional_Bias_Extremes": conditional_bias_extremes(fcst_arr_aurora, tgt_arr_aurora),
+                        "RootMeanSquaredError": rmse(fcst_arr_aurora, tgt_arr_aurora),
+                        "Spatial_IOU": intersection_over_union(fcst_arr_aurora, tgt_arr_aurora),
+                        "Extreme_Area_Ratio": extreme_area_ratio(fcst_arr_aurora, tgt_arr_aurora),
                     }
                     
-                    for metric_name, value in metrics_computed.items():
+                    for m_name, value in metrics_aurora.items():
                         results.append({
                             "case_id_number": case.case_id_number,
                             "event_type": "heat_wave",
                             "forecast_source": model_name,
                             "target_source": "ERA5",
-                            "metric": metric_name,
+                            "metric": m_name,
                             "forecast_variable": "surface_air_temperature",
                             "target_variable": "surface_air_temperature",
                             "init_time": init_t,
                             "valid_time": valid_time,
-                            "lead_time": lt,
+                            "lead_time": lt_seconds,
                             "value": value
                         })
+                        
+                    # 2. Evaluate matched HRES
+                    if has_hres:
+                        try:
+                            # Try to get the exact same lead time from HRES
+                            fcst_2d_hres = hres_fcst["surface_air_temperature"].sel(lead_time=lt)
+                        except KeyError:
+                            pass
+                        else:
+                            fcst_arr_hres, tgt_arr_hres = align_and_subset_2d(fcst_2d_hres, tgt_2d)
+                            
+                            metrics_hres = {
+                                "Peak_Amplitude_Error": peak_amplitude_error(fcst_arr_hres, tgt_arr_hres),
+                                "Conditional_Bias_Extremes": conditional_bias_extremes(fcst_arr_hres, tgt_arr_hres),
+                                "RootMeanSquaredError": rmse(fcst_arr_hres, tgt_arr_hres),
+                                "Spatial_IOU": intersection_over_union(fcst_arr_hres, tgt_arr_hres),
+                                "Extreme_Area_Ratio": extreme_area_ratio(fcst_arr_hres, tgt_arr_hres),
+                            }
+                            
+                            for m_name, value in metrics_hres.items():
+                                results.append({
+                                    "case_id_number": case.case_id_number,
+                                    "event_type": "heat_wave",
+                                    "forecast_source": "HRES",
+                                    "target_source": "ERA5",
+                                    "metric": m_name,
+                                    "forecast_variable": "surface_air_temperature",
+                                    "target_variable": "surface_air_temperature",
+                                    "init_time": init_t,
+                                    "valid_time": valid_time,
+                                    "lead_time": lt_seconds,
+                                    "value": value
+                                })
                         
             aurora_fcst.close()
 

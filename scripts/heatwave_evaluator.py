@@ -178,7 +178,7 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
     # 2. Get Case Metadata
     logger.info("Loading EWB case metadata...")
     all_cases = ewb.load_cases()
-    hw_cases = [c for c in all_cases if c.event_type == "heat_wave"]
+    hw_cases = [[c for c in all_cases if c.event_type == "heat_wave"][0]]
     logger.info(f"Found {len(hw_cases)} heatwave cases.")
 
     # 3. Setup Results List

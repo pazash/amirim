@@ -150,22 +150,13 @@ def get_aurora_files(forecast_dir: str = "ewb_forecasts") -> list[Path]:
 def align_and_subset_2d(
     fcst_da: xr.DataArray,
     tgt_da: xr.DataArray,
-    bbox: "ewb.regions.BoundingBoxRegion",
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Subset arrays to the bounding box and ensure grids perfectly align."""
-    # Standardize longitudes to [0, 360] on the small 2D slices before masking/aligning
-    # This prevents massive Dask graph building/sorting that causes OOM on full datasets
-    fcst_da = standardize_longitude(fcst_da)
-    tgt_da = standardize_longitude(tgt_da)
-
-    # Subset target to bbox (EWB target spatial masking logic)
-    tgt_sub = bbox.mask(tgt_da, drop=True)
+    """Align forecast to the target grid."""
+    # Both arrays are already standardized and spatially subsetted to the bounding box.
+    # We just need to align their exact grid points.
+    fcst_sub = fcst_da.interp_like(tgt_da, method="nearest", kwargs={"fill_value": "extrapolate"})
     
-    # Align forecast to the exact grid of the subsetted target
-    # This interpolates/slices the forecast to exactly match the target's lat/lon
-    fcst_sub = fcst_da.interp_like(tgt_sub, method="nearest", kwargs={"fill_value": "extrapolate"})
-    
-    return fcst_sub.values, tgt_sub.values
+    return fcst_sub.values, tgt_da.values
 
 
 # =============================================================================
@@ -208,40 +199,42 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
         # HRES has 12h resolution, ERA5 has 1h/6h, Aurora has 6h. 
         # We evaluate at every forecast valid_time that falls within the case window.
 
-        # --- A. Evaluate HRES ---
-        logger.info("  Evaluating HRES...")
-        # Find HRES init_times that could potentially have valid_times in the window
-        # Max HRES lead time is ~10 days
+        # --- A. Download Case Data ---
+        logger.info("  Downloading ERA5 subset for this case...")
+        era5_case = era5_ds.sel(time=slice(case.start_date, case.end_date))
+        # Mask spatially, download to memory, then standardize
+        era5_case = case.location.mask(era5_case).compute()
+        era5_case = standardize_longitude(era5_case)
+
+        logger.info("  Downloading HRES subset for this case...")
         hres_init_start = pd.to_datetime(case.start_date) - pd.Timedelta(days=15)
         hres_init_end = pd.to_datetime(case.end_date)
         
-        # Subset HRES to candidate init_times to keep memory low
         try:
-            hres_case_subset = hres_ds.sel(init_time=slice(hres_init_start, hres_init_end))
+            hres_case = hres_ds.sel(init_time=slice(hres_init_start, hres_init_end))
+            hres_case = case.location.mask(hres_case).compute()
+            hres_case = standardize_longitude(hres_case)
         except Exception as e:
             logger.warning(f"  Could not subset HRES for case {case.case_id_number}: {e}")
-            hres_case_subset = None
+            hres_case = None
 
-        if hres_case_subset is not None and len(hres_case_subset.init_time) > 0:
-            for init_t in hres_case_subset.init_time.values:
-                # Get the forecast for this specific init time
-                fcst_init = hres_case_subset.sel(init_time=init_t).load()
+        # --- B. Evaluate HRES ---
+        logger.info("  Evaluating HRES...")
+        if hres_case is not None and len(hres_case.init_time) > 0:
+            for init_t in hres_case.init_time.values:
+                fcst_init = hres_case.sel(init_time=init_t)
                 
                 for lt in fcst_init.lead_time.values:
                     valid_time = init_t + lt
                     if pd.to_datetime(case.start_date) <= pd.to_datetime(valid_time) <= pd.to_datetime(case.end_date):
-                        # Extract the 2D spatial slice
                         fcst_2d = fcst_init["surface_air_temperature"].sel(lead_time=lt)
                         try:
-                            tgt_2d = era5_ds["surface_air_temperature"].sel(time=valid_time).load()
+                            tgt_2d = era5_case["surface_air_temperature"].sel(time=valid_time)
                         except KeyError:
-                            # ERA5 might not have this exact timestamp if it's outside its range
                             continue
                         
-                        # Align and subset to bounding box
-                        fcst_arr, tgt_arr = align_and_subset_2d(fcst_2d, tgt_2d, case.location)
+                        fcst_arr, tgt_arr = align_and_subset_2d(fcst_2d, tgt_2d)
                         
-                        # Compute metrics
                         metrics_computed = {
                             "Peak_Amplitude_Error": peak_amplitude_error(fcst_arr, tgt_arr),
                             "Conditional_Bias_Extremes": conditional_bias_extremes(fcst_arr, tgt_arr),
@@ -265,39 +258,37 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
                                 "value": value
                             })
                             
-        # --- B. Evaluate Aurora ---
+        # --- C. Evaluate Aurora ---
         logger.info("  Evaluating Aurora...")
         for nc_file in aurora_files:
-            # Parse lead bucket for labeling
             match = re.search(r"_L(\d+)_", nc_file.name)
             lead_bucket = f"L{match.group(1)}" if match else "L?"
             model_name = f"aurora1.5_{lead_bucket}"
             
-            # Load the single Aurora forecast file
+            # Load and spatially mask to memory
             aurora_fcst = xr.open_dataset(nc_file)
+            aurora_fcst = case.location.mask(aurora_fcst).compute()
+            aurora_fcst = standardize_longitude(aurora_fcst)
             
             if "2t_aurora" in aurora_fcst.data_vars:
                 aurora_var = "2t_aurora"
             else:
                 aurora_var = [v for v in aurora_fcst.data_vars if v != "latitude" and v != "longitude"][0]
             
-            # For each lead_time step in this forecast
             init_t = aurora_fcst.init_time.values[0]
             for lt in aurora_fcst.lead_time.values:
                 valid_time = init_t + lt
                 
-                # Only evaluate if valid_time is inside the case window
                 if pd.to_datetime(case.start_date) <= pd.to_datetime(valid_time) <= pd.to_datetime(case.end_date):
                     fcst_2d = aurora_fcst[aurora_var].sel(init_time=init_t, lead_time=lt)
                     
                     try:
-                        tgt_2d = era5_ds["surface_air_temperature"].sel(time=valid_time).load()
+                        tgt_2d = era5_case["surface_air_temperature"].sel(time=valid_time)
                     except KeyError:
                         continue
                     
-                    fcst_arr, tgt_arr = align_and_subset_2d(fcst_2d, tgt_2d, case.location)
+                    fcst_arr, tgt_arr = align_and_subset_2d(fcst_2d, tgt_2d)
                     
-                    # Compute metrics
                     metrics_computed = {
                         "Peak_Amplitude_Error": peak_amplitude_error(fcst_arr, tgt_arr),
                         "Conditional_Bias_Extremes": conditional_bias_extremes(fcst_arr, tgt_arr),

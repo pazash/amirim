@@ -213,8 +213,19 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
             lead_bucket = f"L{match.group(1)}" if match else "L?"
             model_name = f"aurora1.5_{lead_bucket}"
             
-            # Load and spatially mask to memory
             aurora_fcst = xr.open_dataset(nc_file)
+            init_t = aurora_fcst.init_time.values[0]
+            lead_times = aurora_fcst.lead_time.values
+            
+            # FAST SKIP: Does this forecast overlap with the case window at all?
+            valid_times = init_t + lead_times
+            start_dt = pd.to_datetime(case.start_date)
+            end_dt = pd.to_datetime(case.end_date)
+            if not np.any((valid_times >= start_dt) & (valid_times <= end_dt)):
+                aurora_fcst.close()
+                continue
+            
+            # Load and spatially mask to memory
             aurora_fcst = case.location.mask(aurora_fcst).compute()
             aurora_fcst = standardize_longitude(aurora_fcst)
             
@@ -223,12 +234,11 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
             else:
                 aurora_var = [v for v in aurora_fcst.data_vars if v != "latitude" and v != "longitude"][0]
             
-            init_t = aurora_fcst.init_time.values[0]
-            
-            # Fetch matching HRES for this exact init_time (all its lead times)
+            # Fetch matching HRES for this exact init_time (or the closest one BEFORE it)
+            # Aurora often initializes at 18:00, but HRES only has 00:00 and 12:00.
             try:
-                # We use nearest within 1 hour in case of minor timestamp discrepancies
-                hres_fcst = hres_ds.sel(init_time=init_t, method="nearest", tolerance=pd.Timedelta("1h"))
+                hres_fcst = hres_ds.sel(init_time=init_t, method="pad")
+                hres_init_t = hres_fcst.init_time.values
                 hres_fcst = case.location.mask(hres_fcst).compute()
                 hres_fcst = standardize_longitude(hres_fcst)
                 has_hres = True
@@ -239,8 +249,8 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
             for lt in aurora_fcst.lead_time.values:
                 valid_time = init_t + lt
                 
-                # Convert lead_time to total seconds as an integer
-                lt_seconds = int(pd.Timedelta(lt).total_seconds())
+                # Convert lead_time to total hours as an integer
+                lt_hours = int(pd.Timedelta(lt).total_seconds() / 3600)
                 
                 # Only evaluate if valid_time is inside the case window
                 if pd.to_datetime(case.start_date) <= pd.to_datetime(valid_time) <= pd.to_datetime(case.end_date):
@@ -272,15 +282,19 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
                             "target_variable": "surface_air_temperature",
                             "init_time": init_t,
                             "valid_time": valid_time,
-                            "lead_time": lt_seconds,
+                            "lead_time": lt_hours,
                             "value": value
                         })
                         
                     # 2. Evaluate matched HRES
                     if has_hres:
+                        # Determine the required HRES lead time to reach this valid_time
+                        hres_lt = valid_time - hres_init_t
+                        hres_lt_hours = int(pd.Timedelta(hres_lt).total_seconds() / 3600)
+                        
                         try:
-                            # Try to get the exact same lead time from HRES
-                            fcst_2d_hres = hres_fcst["surface_air_temperature"].sel(lead_time=lt)
+                            # Try to get the exact matching valid_time from HRES
+                            fcst_2d_hres = hres_fcst["surface_air_temperature"].sel(lead_time=hres_lt)
                         except KeyError:
                             pass
                         else:
@@ -303,9 +317,9 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
                                     "metric": m_name,
                                     "forecast_variable": "surface_air_temperature",
                                     "target_variable": "surface_air_temperature",
-                                    "init_time": init_t,
+                                    "init_time": hres_init_t,
                                     "valid_time": valid_time,
-                                    "lead_time": lt_seconds,
+                                    "lead_time": hres_lt_hours,
                                     "value": value
                                 })
                         

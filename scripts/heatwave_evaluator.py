@@ -178,7 +178,7 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
     # 2. Get Case Metadata
     logger.info("Loading EWB case metadata...")
     all_cases = ewb.load_cases()
-    hw_cases = [[c for c in all_cases if c.event_type == "heat_wave"][0]]
+    hw_cases = [c for c in all_cases if c.event_type == "heat_wave"]
     logger.info(f"Found {len(hw_cases)} heatwave cases.")
 
     # 3. Setup Results List
@@ -294,7 +294,8 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
                         
                         try:
                             # Try to get the exact matching valid_time from HRES
-                            fcst_2d_hres = hres_fcst["surface_air_temperature"].sel(lead_time=hres_lt)
+                            # Note: HRES lead_time coordinate is an integer representing hours
+                            fcst_2d_hres = hres_fcst["surface_air_temperature"].sel(lead_time=hres_lt_hours)
                         except KeyError:
                             pass
                         else:

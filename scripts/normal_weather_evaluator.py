@@ -4,6 +4,8 @@ import warnings
 import logging
 from pathlib import Path
 import sys
+import gc
+import torch
 
 import aiohttp
 import numpy as np
@@ -216,8 +218,20 @@ def generate_normal_forecasts(output_dir="normal_forecasts/"):
             full_event_ds = xr.concat(event_ds_list, dim="lead_time")
             full_event_ds.to_netcdf(filename, engine='h5netcdf')
             
+            # Handle and empty GPU memory
+            del input_batch
+            del predicted_batches
+            del event_ds_list
+            del full_event_ds
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            
         except Exception as e:
             logger.error(f"Failed on {init_time} for lead {start_lead}h: {e}")
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 
 # =============================================================================

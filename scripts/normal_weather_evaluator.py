@@ -229,6 +229,17 @@ def generate_normal_forecasts(output_dir="normal_forecasts/"):
             
         except Exception as e:
             logger.error(f"Failed on {init_time} for lead {start_lead}h: {e}")
+            
+            # Automatically delete corrupted cache files so they are re-downloaded next time
+            error_str = str(e)
+            if "HDF error" in error_str:
+                match = re.search(r"'(.*\.nc)'", error_str)
+                if match:
+                    corrupt_file = Path(match.group(1))
+                    if corrupt_file.exists():
+                        logger.warning(f"Deleting corrupted cache file: {corrupt_file}")
+                        corrupt_file.unlink()
+            
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()

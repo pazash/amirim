@@ -175,6 +175,8 @@ def generate_normal_forecasts(output_dir="normal_forecasts/"):
                 filename = Path(output_dir) / f"aurora_hw_forecast_{init_time.strftime('%Y%m%d')}_L{start_lead}_full_event.nc"
                 if not filename.exists():
                     to_generate.append((case, normal_start, normal_end, start_lead, init_time, filename))
+                else:
+                    logger.info(f"Skipping {case.title} at {start_lead}h start lead - File {filename.name} already exists")
                 
     if not to_generate:
         logger.info("All normal forecasts already generated.")

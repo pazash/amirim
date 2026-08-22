@@ -1,6 +1,5 @@
 import os
 import re
-import random
 import logging
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -21,75 +20,40 @@ from aurora import AuroraV1p5
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
+# Bounding boxes
+ORIGINAL_MED_BBOX = {
+    "lon_min": 4.0,
+    "lon_max": 45.5,
+    "lat_max": 53.0,
+    "lat_min": 25.5
+}
+
+# Prediction scopes (adding padding to see how spatial context affects regional prediction)
+# Weather systems typically move west to east. 5 days of lead time requires capturing
+# systems that might travel thousands of kilometers.
+PREDICTION_SCOPES = {
+    "Original": ORIGINAL_MED_BBOX,
+    "Enlarged_Small": { # approx +5 degrees padding
+        "lon_min": -1.0,
+        "lon_max": 50.5,
+        "lat_max": 58.0,
+        "lat_min": 20.5
+    },
+    "Enlarged_Large": { # approx +15 degrees padding
+        "lon_min": -11.0,
+        "lon_max": 60.5,
+        "lat_max": 68.0,
+        "lat_min": 10.5
+    },
+    "Global": None
+}
+
+
 def rmse(forecast_2d: np.ndarray, target_2d: np.ndarray) -> float:
     if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
         return np.nan
     diff = forecast_2d - target_2d
     return float(np.sqrt(np.nanmean(diff**2)))
-
-def get_available_dates(cache_dir: str = "weather_data") -> list[datetime]:
-    """Scans cache_dir for downloaded ERA5 files and returns a list of all valid daily init_times (12:00) available."""
-    cache_path = Path(cache_dir)
-    available_dates = []
-    
-    if not cache_path.exists():
-        logger.warning(f"Cache dir {cache_dir} not found. Returning empty list.")
-        return []
-
-    # Look for files like era5_surf_20210710_00_to_20210815_00.nc
-    for file_path in cache_path.glob("era5_surf_*_to_*.nc"):
-        match = re.search(r"era5_surf_(\d{8}_\d{2})_to_(\d{8}_\d{2})\.nc", file_path.name)
-        if match:
-            start_str, end_str = match.groups()
-            start_dt = datetime.strptime(start_str, "%Y%m%d_%H")
-            end_dt = datetime.strptime(end_str, "%Y%m%d_%H")
-            
-            # Add days in between (we need at least 6 hours of history, so start from start_dt + 12h)
-            # We'll use 12:00 UTC as our standard init time.
-            current = start_dt.replace(hour=12, minute=0, second=0)
-            if current < start_dt + timedelta(hours=6):
-                current += timedelta(days=1)
-                
-            # We also need to be able to forecast forward (e.g., 5 days = 120 hours).
-            # So the end_dt should be at least 120 hours after our init_time if we want to evaluate it.
-            while current + timedelta(hours=120) <= end_dt:
-                available_dates.append(current)
-                current += timedelta(days=1)
-                
-    return sorted(list(set(available_dates)))
-
-def select_random_dates(dates: list[datetime], num_samples: int = 5) -> list[datetime]:
-    """Selects random dates, trying to spread them across different years."""
-    if not dates:
-        return []
-        
-    dates_by_year = {}
-    for d in dates:
-        dates_by_year.setdefault(d.year, []).append(d)
-        
-    selected = []
-    years = list(dates_by_year.keys())
-    
-    # Try to get at least one from each year if possible
-    for year in years:
-        if len(selected) < num_samples:
-            d = random.choice(dates_by_year[year])
-            selected.append(d)
-            dates_by_year[year].remove(d)
-            if not dates_by_year[year]:
-                del dates_by_year[year]
-                
-    # If we still need more, randomly sample from remaining
-    remaining_dates = [d for sublist in dates_by_year.values() for d in sublist]
-    if len(selected) < num_samples and remaining_dates:
-        needed = num_samples - len(selected)
-        selected.extend(random.sample(remaining_dates, min(needed, len(remaining_dates))))
-        
-    return selected
-
-def align_and_subset_2d(fcst_da: xr.DataArray, tgt_da: xr.DataArray) -> tuple[np.ndarray, np.ndarray]:
-    fcst_sub = fcst_da.interp_like(tgt_da, method="nearest", kwargs={"fill_value": "extrapolate"})
-    return fcst_sub.values, tgt_da.values
 
 def aurora_batch_to_xarray(predicted_batch, init_time, lead_time_hours):
     t2m_tensor = predicted_batch.surf_vars["2t"].detach().cpu().numpy().squeeze()
@@ -100,153 +64,178 @@ def aurora_batch_to_xarray(predicted_batch, init_time, lead_time_hours):
             "2t_aurora": (["latitude", "longitude"], t2m_tensor),
         },
         coords={
+            "init_time": [pd.to_datetime(init_time)],
+            "lead_time": pd.to_timedelta([f"{lead_time_hours}h"]),
             "latitude": lats,
             "longitude": lons,
         }
     )
     return ds
 
-def main():
-    logger.info("Starting Global vs Med Aurora comparison...")
-    
+def align_and_subset_2d(fcst_da: xr.DataArray, tgt_da: xr.DataArray) -> tuple[np.ndarray, np.ndarray]:
+    fcst_sub = fcst_da.interp_like(tgt_da, method="nearest", kwargs={"fill_value": "extrapolate"})
+    return fcst_sub.values, tgt_da.values
+
+def generate_forecasts(output_dir: str = "med_comparison_forecasts"):
+    """Runs Aurora predictions and saves them to NetCDF."""
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
     cache_dir = Path("weather_data")
     
-    # Define bounding box (ICON-MED enlarged by ~2.5 degrees)
-    # Original: Lon 4.0 to 45.5, Lat 25.5 to 53.0
-    med_bbox = {
-        "lon_min": 1.5,
-        "lon_max": 48.0,
-        "lat_max": 55.5,
-        "lat_min": 23.0
-    }
-    logger.info(f"Using Bounding Box: {med_bbox}")
+    # 5 arbitrary diverse dates across different seasons
+    selected_dates = [
+        datetime(2021, 6, 15, 12),
+        datetime(2021, 7, 25, 12),
+        datetime(2022, 1, 10, 12),
+        datetime(2022, 4, 18, 12),
+        datetime(2022, 11, 20, 12)
+    ]
     
-    # Find available dates
-    available_dates = get_available_dates(cache_dir)
-    if not available_dates:
-        logger.warning(f"No valid dates found in {cache_dir}. Assuming this runs on remote with missing files.")
-        logger.info("Will attempt to use a default date: 2021-07-25 12:00:00")
-        selected_dates = [datetime(2021, 7, 25, 12)]
-    else:
-        selected_dates = select_random_dates(available_dates, num_samples=3)
-        
-    logger.info(f"Selected dates for evaluation: {[d.strftime('%Y-%m-%d') for d in selected_dates]}")
+    lead_times_h = [24, 72, 120]
     
-    # Load Model
-    logger.info("Loading Aurora Model...")
+    logger.info("Loading Aurora Model for inference...")
     aurora_model = AuroraV1p5()
     aurora_model.load_checkpoint("microsoft/aurora", "aurora-0.25-v1.5.ckpt", revision="main")
     forecaster = AuroraForecaster(model=aurora_model)
     data_pipeline = AuroraDataLoader(cache_dir=cache_dir)
     
-    # Define lead times to evaluate
+    for init_dt in selected_dates:
+        logger.info(f"--- Generating Forecasts for Init Time: {init_dt} ---")
+        init_str = init_dt.strftime("%Y%m%d_%H")
+        
+        for scope_name, bbox in PREDICTION_SCOPES.items():
+            out_file = Path(output_dir) / f"aurora_{scope_name}_{init_str}.nc"
+            
+            if not out_file.exists():
+                logger.info(f"Running Aurora for scope: {scope_name}...")
+                try:
+                    input_batch, _ = data_pipeline.get_batches(init_dt, history_steps=1, forecast_steps=0, bbox=bbox)
+                    forecast_batches = forecaster.predict_rollout(
+                        initial_batch=input_batch,
+                        steps=int(max(lead_times_h) / 6),
+                        fine_lead_times=[6.0]
+                    )
+                    del input_batch
+                    
+                    # Combine and save
+                    ds_list = []
+                    for lt_h in lead_times_h:
+                        step_idx = int(lt_h / 6) - 1
+                        batch = forecast_batches[step_idx]
+                        ds_list.append(aurora_batch_to_xarray(batch, init_dt, lt_h))
+                    
+                    xr.concat(ds_list, dim="lead_time").to_netcdf(out_file, engine='h5netcdf')
+                    del forecast_batches
+                    del ds_list
+                except Exception as e:
+                    logger.error(f"{scope_name} run failed for {init_dt}: {e}")
+            else:
+                logger.info(f"{scope_name} forecast for {init_dt} already exists.")
+                
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+def evaluate_forecasts(forecast_dir: str = "med_comparison_forecasts"):
+    """Evaluates the saved forecasts against ERA5 strictly on the ORIGINAL bounding box."""
+    logger.info("Starting Evaluation...")
+    cache_dir = Path("weather_data")
+    forecast_path = Path(forecast_dir)
+    data_pipeline = AuroraDataLoader(cache_dir=cache_dir)
+    
     lead_times_h = [24, 72, 120]
     results = []
     
-    for init_dt in selected_dates:
-        logger.info(f"--- Processing Init Time: {init_dt} ---")
+    # Get all unique init times from generated files
+    all_files = list(forecast_path.glob("aurora_Original_*.nc"))
+    
+    if not all_files:
+        logger.warning(f"No forecast files found in {forecast_dir}. Please run generation first.")
+        return
         
-        # 1. Global Run
-        logger.info("Running Global Aurora...")
-        try:
-            global_input, _ = data_pipeline.get_batches(init_dt, history_steps=1, forecast_steps=0, bbox=None)
-            global_forecast_batches = forecaster.predict_rollout(
-                initial_batch=global_input,
-                steps=int(max(lead_times_h) / 6),
-                fine_lead_times=[6.0]
-            )
-            del global_input
-        except Exception as e:
-            logger.error(f"Global run failed for {init_dt}: {e}")
+    for original_file in all_files:
+        match = re.search(r"aurora_Original_(\d{8}_\d{2})\.nc", original_file.name)
+        if not match:
             continue
             
-        # 2. Regional Run (Med bbox)
-        logger.info("Running Regional Aurora (Med bbox)...")
-        try:
-            med_input, _ = data_pipeline.get_batches(init_dt, history_steps=1, forecast_steps=0, bbox=med_bbox)
-            med_forecast_batches = forecaster.predict_rollout(
-                initial_batch=med_input,
-                steps=int(max(lead_times_h) / 6),
-                fine_lead_times=[6.0]
-            )
-            del med_input
-        except Exception as e:
-            logger.error(f"Regional run failed for {init_dt}: {e}")
-            continue
-            
-        # 3. Ground Truth (ERA5 for Med)
+        init_str = match.group(1)
+        init_dt = datetime.strptime(init_str, "%Y%m%d_%H")
+        
+        logger.info(f"--- Evaluating Forecasts for Init Time: {init_dt} ---")
+        
+        # Ground Truth (ERA5 strictly on Original Med bbox)
         target_dts = [init_dt + timedelta(hours=lt) for lt in lead_times_h]
         try:
-            target_ds = data_pipeline._fetch_era5_combined(target_dts, bbox=med_bbox)
+            target_ds = data_pipeline._fetch_era5_combined(target_dts, bbox=ORIGINAL_MED_BBOX)
         except Exception as e:
             logger.error(f"Failed to load target data for {init_dt}: {e}")
             continue
 
-        # Evaluate
-        for lt_h in lead_times_h:
-            valid_dt = init_dt + timedelta(hours=lt_h)
-            step_idx = int(lt_h / 6) - 1
-            
-            # Ground truth
-            valid_dt_str = valid_dt.strftime("%Y-%m-%dT%H:00:00")
-            try:
-                tgt_2d = target_ds["2m_temperature"].sel(time=valid_dt_str)
-            except KeyError:
-                logger.warning(f"Target data missing for {valid_dt_str}, skipping.")
+        # Evaluate across all scopes
+        for scope_name in PREDICTION_SCOPES.keys():
+            scope_file = forecast_path / f"aurora_{scope_name}_{init_str}.nc"
+            if not scope_file.exists():
+                logger.warning(f"Missing {scope_name} forecast for {init_dt}, skipping.")
                 continue
-
-            # Global Model Output cropped to bbox
-            global_batch = global_forecast_batches[step_idx]
-            global_ds = aurora_batch_to_xarray(global_batch, init_dt, lt_h)
-            
-            # Crop global ds to Med bbox
-            global_cropped = global_ds.sel(
-                latitude=slice(med_bbox["lat_max"], med_bbox["lat_min"]),
-                longitude=slice(med_bbox["lon_min"], med_bbox["lon_max"])
-            )
-            fcst_arr_global, tgt_arr = align_and_subset_2d(global_cropped["2t_aurora"], tgt_2d)
-            rmse_global = rmse(fcst_arr_global, tgt_arr)
-            
-            # Regional Model Output (already in bbox)
-            med_batch = med_forecast_batches[step_idx]
-            med_ds = aurora_batch_to_xarray(med_batch, init_dt, lt_h)
-            fcst_arr_med, tgt_arr_med = align_and_subset_2d(med_ds["2t_aurora"], tgt_2d)
-            rmse_med = rmse(fcst_arr_med, tgt_arr_med)
-            
-            logger.info(f"Lead time {lt_h}h | RMSE Global: {rmse_global:.3f} | RMSE Regional: {rmse_med:.3f}")
-            
-            results.append({
-                "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "valid_time": valid_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "lead_time_hours": lt_h,
-                "metric": "RMSE",
-                "model": "Aurora_Global",
-                "value": rmse_global
-            })
-            
-            results.append({
-                "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "valid_time": valid_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                "lead_time_hours": lt_h,
-                "metric": "RMSE",
-                "model": "Aurora_Regional",
-                "value": rmse_med
-            })
-            
-        # Cleanup memory for next date
-        del global_forecast_batches
-        del med_forecast_batches
-        del target_ds
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+                
+            try:
+                scope_ds = xr.open_dataset(scope_file)
+            except Exception as e:
+                logger.error(f"Failed to open forecast file {scope_file}: {e}")
+                continue
+                
+            for lt_h in lead_times_h:
+                valid_dt = init_dt + timedelta(hours=lt_h)
+                valid_dt_str = valid_dt.strftime("%Y-%m-%dT%H:00:00")
+                
+                try:
+                    tgt_2d = target_ds["2m_temperature"].sel(time=valid_dt_str)
+                except KeyError:
+                    logger.warning(f"Target data missing for {valid_dt_str}, skipping.")
+                    continue
+                    
+                # Evaluate on Original Box
+                fcst_2d = scope_ds["2t_aurora"].sel(lead_time=pd.to_timedelta(f"{lt_h}h")).squeeze()
+                fcst_cropped = fcst_2d.sel(
+                    latitude=slice(ORIGINAL_MED_BBOX["lat_max"], ORIGINAL_MED_BBOX["lat_min"]),
+                    longitude=slice(ORIGINAL_MED_BBOX["lon_min"], ORIGINAL_MED_BBOX["lon_max"])
+                )
+                fcst_arr, tgt_arr = align_and_subset_2d(fcst_cropped, tgt_2d)
+                rmse_val = rmse(fcst_arr, tgt_arr)
+                
+                logger.info(f"Lead time {lt_h}h | Model: {scope_name} | RMSE: {rmse_val:.3f}")
+                
+                results.append({
+                    "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "valid_time": valid_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "lead_time_hours": lt_h,
+                    "metric": "RMSE",
+                    "model": f"Aurora_{scope_name}",
+                    "value": rmse_val
+                })
+                
+            scope_ds.close()
 
     if results:
         df = pd.DataFrame(results)
-        df.to_csv("aurora_global_vs_regional_rmse.csv", index=False)
-        logger.info("Saved results to aurora_global_vs_regional_rmse.csv")
+        df.to_csv("aurora_context_comparison_rmse.csv", index=False)
+        logger.info("Saved results to aurora_context_comparison_rmse.csv")
     else:
         logger.warning("No results to save.")
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Compare Aurora scopes over Mediterranean")
+    parser.add_argument("--generate", action="store_true", help="Run forecast generation")
+    parser.add_argument("--evaluate", action="store_true", help="Run evaluation on saved forecasts")
+    
+    args = parser.parse_args()
+    
+    if not args.generate and not args.evaluate:
+        logger.info("No flags provided. Running both generation and evaluation sequentially.")
+        generate_forecasts()
+        evaluate_forecasts()
+    else:
+        if args.generate:
+            generate_forecasts()
+        if args.evaluate:
+            evaluate_forecasts()

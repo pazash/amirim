@@ -31,19 +31,26 @@ ORIGINAL_MED_BBOX = {
 # Prediction scopes (adding padding to see how spatial context affects regional prediction)
 # Weather systems typically move west to east. 5 days of lead time requires capturing
 # systems that might travel thousands of kilometers.
+# NOTE: Bounding boxes must have grid dimensions that are exact multiples of 16 for Aurora.
+# Also, negative longitudes must be converted to 0-360 range for the dataloader wrap-around.
 PREDICTION_SCOPES = {
-    "Original": ORIGINAL_MED_BBOX,
-    "Enlarged_Small": { # approx +5 degrees padding
-        "lon_min": -1.0,
-        "lon_max": 50.5,
-        "lat_max": 58.0,
-        "lat_min": 20.5
+    "Original": { # Padded to multiple of 16 (176x112 points), but evaluated on ORIGINAL_MED_BBOX
+        "lon_min": 2.0,
+        "lon_max": 45.75,
+        "lat_max": 53.25,
+        "lat_min": 25.5
     },
-    "Enlarged_Large": { # approx +15 degrees padding
-        "lon_min": -11.0,
-        "lon_max": 60.5,
-        "lat_max": 68.0,
-        "lat_min": 10.5
+    "Enlarged_Small": { # approx +5 degrees padding, multiple of 16 (224x176 points)
+        "lon_min": 357.0,  # 360 - 3.0 (wrap-around for negative longitudes)
+        "lon_max": 52.75,
+        "lat_max": 61.25,
+        "lat_min": 17.5
+    },
+    "Enlarged_Large": { # approx +15 degrees padding, multiple of 16 (320x240 points)
+        "lon_min": 345.0,  # 360 - 15.0
+        "lon_max": 64.75,
+        "lat_max": 69.25,
+        "lat_min": 9.5
     },
     "Global": None
 }

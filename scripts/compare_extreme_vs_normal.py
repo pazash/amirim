@@ -96,6 +96,81 @@ def compare_performance(extreme_csv="heatwave_evaluations.csv", normal_csv="norm
     plt.savefig(f"{output_dir}/peak_amplitude_error.png", dpi=300)
     plt.close()
     
+    # Plot 3: Regular Aurora vs Extreme Aurora RMSE
+    aurora_rmse = rmse_merged[rmse_merged["model"] == "Aurora V1.5"]
+    if not aurora_rmse.empty:
+        plt.figure(figsize=(10, 6))
+        sns.lineplot(
+            data=pd.melt(
+                aurora_rmse,
+                id_vars=["lead_time"],
+                value_vars=["value_normal", "value_extreme"],
+                var_name="regime",
+                value_name="rmse"
+            ).replace({"value_normal": "Normal Weather", "value_extreme": "Extreme (Heatwave)"}),
+            x="lead_time", y="rmse", hue="regime", marker="o", linewidth=2
+        )
+        plt.title("Aurora V1.5 RMSE: Normal vs Extreme Weather", fontsize=14)
+        plt.xlabel("Lead Time (Hours)", fontsize=12)
+        plt.ylabel("RMSE", fontsize=12)
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig(f"{output_dir}/aurora_rmse_normal_vs_extreme.png", dpi=300)
+        plt.close()
+
+    # Plot 4: Aurora RMSE compared to HRES RMSE (Normal vs Extreme)
+    # Pivot to calculate difference (Aurora - HRES)
+    try:
+        rmse_extreme_pivot = rmse_extreme.pivot(index="lead_time", columns="model", values="value").reset_index()
+        rmse_normal_pivot = rmse_normal.pivot(index="lead_time", columns="model", values="value").reset_index()
+        
+        if "Aurora V1.5" in rmse_extreme_pivot.columns and "HRES" in rmse_extreme_pivot.columns and \
+           "Aurora V1.5" in rmse_normal_pivot.columns and "HRES" in rmse_normal_pivot.columns:
+            
+            rmse_extreme_pivot["diff"] = rmse_extreme_pivot["Aurora V1.5"] - rmse_extreme_pivot["HRES"]
+            rmse_normal_pivot["diff"] = rmse_normal_pivot["Aurora V1.5"] - rmse_normal_pivot["HRES"]
+            
+            diff_df = pd.DataFrame({
+                "lead_time": rmse_normal_pivot["lead_time"],
+                "Normal Weather": rmse_normal_pivot["diff"],
+                "Extreme (Heatwave)": rmse_extreme_pivot["diff"]
+            })
+            
+            diff_melt = pd.melt(diff_df, id_vars=["lead_time"], value_vars=["Normal Weather", "Extreme (Heatwave)"], 
+                                var_name="regime", value_name="rmse_diff")
+            
+            plt.figure(figsize=(10, 6))
+            sns.lineplot(data=diff_melt, x="lead_time", y="rmse_diff", hue="regime", marker="o", linewidth=2)
+            plt.axhline(0, color="black", linestyle="--", alpha=0.6, label="Equal Performance")
+            plt.title("Aurora V1.5 vs HRES RMSE Difference\nNegative values = Aurora is better than HRES", fontsize=14)
+            plt.xlabel("Lead Time (Hours)", fontsize=12)
+            plt.ylabel("RMSE Difference (Aurora - HRES)", fontsize=12)
+            plt.legend()
+            plt.tight_layout()
+            plt.savefig(f"{output_dir}/aurora_vs_hres_rmse_diff.png", dpi=300)
+            plt.close()
+    except Exception as e:
+        logger.warning(f"Could not generate Aurora vs HRES comparison plot: {e}")
+
+    # Plot 5: Percentage Degradation in RMSE (Extreme vs Normal)
+    # Formula: ((Extreme RMSE - Normal RMSE) / Normal RMSE) * 100
+    rmse_merged["rmse_degradation_pct"] = ((rmse_merged["value_extreme"] - rmse_merged["value_normal"]) / rmse_merged["value_normal"]) * 100
+    
+    plt.figure(figsize=(12, 6))
+    sns.barplot(data=rmse_merged, x="lead_time", y="rmse_degradation_pct", hue="model", alpha=0.85)
+    plt.axhline(0, color="black", linestyle="-", linewidth=1.5)
+    plt.title("RMSE Percentage Degradation (Extreme vs Normal Weather)\nHow much higher is the error during heatwaves?", fontsize=14)
+    plt.xlabel("Lead Time (Hours)", fontsize=12)
+    plt.ylabel("RMSE Degradation (%)", fontsize=12)
+    
+    from matplotlib.ticker import PercentFormatter
+    plt.gca().yaxis.set_major_formatter(PercentFormatter(xmax=100))
+    
+    plt.legend(title="Model")
+    plt.tight_layout()
+    plt.savefig(f"{output_dir}/rmse_percentage_degradation.png", dpi=300)
+    plt.close()
+
     logger.info(f"Plots saved to {output_dir}/")
 
 if __name__ == "__main__":

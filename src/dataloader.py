@@ -117,24 +117,13 @@ class AuroraDataLoader:
         ds = ds.sel(time=exact_times)
 
         if bbox is not None:
-            l_min = bbox["lon_min"]
-            l_max = bbox["lon_max"]
-
-            if l_min < 0:
-                # Negative lon_min (e.g. -3.0): fetch western part from 0-360 range,
-                # then shift to negative coords to keep longitudes strictly increasing.
-                part1 = ds.sel(longitude=slice(l_min + 360, 359.75))
-                part2 = ds.sel(longitude=slice(0, l_max))
-                part1 = part1.assign_coords(longitude=part1.longitude - 360)
-                ds = xr.concat([part1, part2], dim="longitude")
-            elif l_min > l_max:
-                # Anti-meridian crossing (lon_min in 0-360 format, e.g. 357 > 52)
-                part1 = ds.sel(longitude=slice(l_min, 360))
-                part2 = ds.sel(longitude=slice(0, l_max))
+            if bbox["lon_min"] > bbox["lon_max"]:
+                part1 = ds.sel(longitude=slice(bbox["lon_min"], 360))
+                part2 = ds.sel(longitude=slice(0, bbox["lon_max"]))
                 part1 = part1.assign_coords(longitude=part1.longitude - 360)
                 ds = xr.concat([part1, part2], dim="longitude")
             else:
-                ds = ds.sel(longitude=slice(l_min, l_max))
+                ds = ds.sel(longitude=slice(bbox["lon_min"], bbox["lon_max"]))
 
             ds = ds.sel(latitude=slice(bbox["lat_max"], bbox["lat_min"]))
 
@@ -196,11 +185,7 @@ class AuroraDataLoader:
                 static_inputs[k] = torch.from_numpy(v).float()
 
         lon_vals = ds.longitude.values.astype(np.float64)
-        # NOTE: Do NOT convert negative longitudes to 0-360 here.
-        # After cross-meridian slicing, coords are e.g. [-3, ..., 52] (strictly increasing).
-        # Converting back to [357, ..., 0, ..., 52] would break monotonicity,
-        # which Aurora rejects. The static variable lookup already handles
-        # negatives via `l % 360` (line 175).
+        lon_vals = np.where(lon_vals < 0, lon_vals + 360, lon_vals)
 
         lat_tensor = torch.from_numpy(ds.latitude.values.copy())
         lon_tensor = torch.from_numpy(lon_vals)

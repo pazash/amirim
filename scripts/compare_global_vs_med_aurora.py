@@ -20,36 +20,35 @@ from aurora import AuroraV1p5
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Bounding boxes
+# Evaluation bounding box — all scopes are evaluated on this region.
+# Shifted east from the original Mediterranean bbox so that all prediction scopes
+# can be perfectly centered (Aurora requires lon in [0, 360) AND strictly increasing,
+# so we cannot cross the prime meridian).
 ORIGINAL_MED_BBOX = {
-    "lon_min": 4.0,
-    "lon_max": 45.5,
-    "lat_max": 53.0,
+    "lon_min": 18.0,
+    "lon_max": 61.75,
+    "lat_max": 53.25,
     "lat_min": 25.5
 }
 
-# Prediction scopes (adding padding to see how spatial context affects regional prediction)
-# Weather systems typically move west to east. 5 days of lead time requires capturing
-# systems that might travel thousands of kilometers.
-# NOTE: Grid dimensions (W x H in 0.25° cells) must be exact multiples of 16 for Aurora's
-# patch-based architecture. Boxes are centered on the original Mediterranean bbox
-# (lon ~24.75°, lat ~39.25°). Negative lon_min values are supported by the dataloader.
+# Prediction scopes — all centered on (39.875°E, 39.375°N).
+# Grid dimensions (W x H) are exact multiples of 16 for Aurora's patch-based architecture.
 PREDICTION_SCOPES = {
-    "Original": {  # 176x112 points — tight around Mediterranean
-        "lon_min": 3.0,
-        "lon_max": 46.75,
-        "lat_max": 53.0,
-        "lat_min": 25.25
+    "Original": {  # 176x112 points — same as evaluation box
+        "lon_min": 18.0,
+        "lon_max": 61.75,
+        "lat_max": 53.25,
+        "lat_min": 25.5
     },
-    "Enlarged_Small": {  # 224x176 points — ~+5° centered padding
-        "lon_min": -3.0,
-        "lon_max": 52.75,
+    "Enlarged_Small": {  # 224x176 points — ~+6° centered padding
+        "lon_min": 12.0,
+        "lon_max": 67.75,
         "lat_max": 61.25,
         "lat_min": 17.5
     },
-    "Enlarged_Large": {  # 320x240 points — ~+15° centered padding
-        "lon_min": -15.0,
-        "lon_max": 64.75,
+    "Enlarged_Large": {  # 320x240 points — ~+18° centered padding
+        "lon_min": 0.0,
+        "lon_max": 79.75,
         "lat_max": 69.25,
         "lat_min": 9.5
     },

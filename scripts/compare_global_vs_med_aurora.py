@@ -31,23 +31,24 @@ ORIGINAL_MED_BBOX = {
 # Prediction scopes (adding padding to see how spatial context affects regional prediction)
 # Weather systems typically move west to east. 5 days of lead time requires capturing
 # systems that might travel thousands of kilometers.
-# NOTE: Bounding boxes must have grid dimensions that are exact multiples of 16 for Aurora.
-# Also, negative longitudes must be converted to 0-360 range for the dataloader wrap-around.
+# NOTE: Grid dimensions (W x H in 0.25° cells) must be exact multiples of 16 for Aurora's
+# patch-based architecture. Boxes are centered on the original Mediterranean bbox
+# (lon ~24.75°, lat ~39.25°). Negative lon_min values are supported by the dataloader.
 PREDICTION_SCOPES = {
-    "Original": { # Padded to multiple of 16 (176x112 points), but evaluated on ORIGINAL_MED_BBOX
-        "lon_min": 2.0,
-        "lon_max": 45.75,
-        "lat_max": 53.25,
-        "lat_min": 25.5
+    "Original": {  # 176x112 points — tight around Mediterranean
+        "lon_min": 3.0,
+        "lon_max": 46.75,
+        "lat_max": 53.0,
+        "lat_min": 25.25
     },
-    "Enlarged_Small": { # approx +5 degrees padding, multiple of 16 (224x176 points)
-        "lon_min": 357.0,  # 360 - 3.0 (wrap-around for negative longitudes)
+    "Enlarged_Small": {  # 224x176 points — ~+5° centered padding
+        "lon_min": -3.0,
         "lon_max": 52.75,
         "lat_max": 61.25,
         "lat_min": 17.5
     },
-    "Enlarged_Large": { # approx +15 degrees padding, multiple of 16 (320x240 points)
-        "lon_min": 345.0,  # 360 - 15.0
+    "Enlarged_Large": {  # 320x240 points — ~+15° centered padding
+        "lon_min": -15.0,
         "lon_max": 64.75,
         "lat_max": 69.25,
         "lat_min": 9.5

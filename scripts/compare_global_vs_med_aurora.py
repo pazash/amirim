@@ -195,7 +195,7 @@ def evaluate_forecasts(forecast_dir: str = "med_comparison_forecasts"):
                 valid_dt_str = valid_dt.strftime("%Y-%m-%dT%H:00:00")
                 
                 try:
-                    tgt_2d = target_ds["2m_temperature"].sel(time=valid_dt_str)
+                    tgt_2d = target_ds["t2m"].sel(time=valid_dt_str)
                 except KeyError:
                     logger.warning(f"Target data missing for {valid_dt_str}, skipping.")
                     continue

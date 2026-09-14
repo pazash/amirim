@@ -11,6 +11,11 @@ import aiohttp
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+# Use anonymous access for GCS (ERA5, HRES)
+os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "false"
+os.environ["GCSFS_TOKEN"] = "anon"
+
 import extremeweatherbench as ewb
 
 # Suppress warnings that aren't useful during evaluation
@@ -22,9 +27,7 @@ warnings.filterwarnings("ignore", message="Mean of empty slice")
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-# Use anonymous access for GCS (ERA5, HRES)
-os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "false"
-os.environ["GCSFS_TOKEN"] = "anon"
+
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.dataloader import AuroraDataLoader

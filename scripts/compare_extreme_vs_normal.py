@@ -7,7 +7,7 @@ import logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
-def compare_performance(extreme_csv="heatwave_evaluations.csv", normal_csv="normal_evaluations.csv", output_dir="plots"):
+def compare_performance(extreme_csv="heatwave_evaluations.csv", normal_csv="normal_evaluations.csv", output_dir="plots/extreme_vs_normal"):
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     
     if not Path(extreme_csv).exists() or not Path(normal_csv).exists():
@@ -28,6 +28,20 @@ def compare_performance(extreme_csv="heatwave_evaluations.csv", normal_csv="norm
         
     df_extreme["model"] = df_extreme["forecast_source"].apply(clean_model_name)
     df_normal["model"] = df_normal["forecast_source"].apply(clean_model_name)
+
+    # Filter for lead times up to 240 hours as requested
+    df_extreme = df_extreme[df_extreme["lead_time"] <= 240]
+    df_normal = df_normal[df_normal["lead_time"] <= 240]
+
+    def filter_common_targets(df):
+        aurora_targets = df[df['model'] == 'Aurora V1.5'][['valid_time', 'case_id_number']].drop_duplicates()
+        hres_targets = df[df['model'] == 'HRES'][['valid_time', 'case_id_number']].drop_duplicates()
+        common_targets = pd.merge(aurora_targets, hres_targets, on=['valid_time', 'case_id_number'], how='inner')
+        return pd.merge(df, common_targets, on=['valid_time', 'case_id_number'], how='inner')
+
+    # Apply the fair-comparison filter
+    df_extreme = filter_common_targets(df_extreme)
+    df_normal = filter_common_targets(df_normal)
 
     # 1. RMSE Comparison
     rmse_extreme = df_extreme[df_extreme["metric"] == "RootMeanSquaredError"].groupby(["model", "lead_time"])["value"].mean().reset_index()

@@ -37,7 +37,7 @@ class PrecipCase:
         self.end_date = end_date
         self.event_type = "extreme_precipitation"
         self.location = ewb.regions.BoundingBoxRegion(
-            name=title, lat_min=lat_min, lat_max=lat_max, lon_min=lon_min, lon_max=lon_max
+            latitude_min=lat_min, latitude_max=lat_max, longitude_min=lon_min, longitude_max=lon_max
         )
 
 PRECIP_CASES = [
@@ -267,8 +267,16 @@ def evaluate_precip_events(forecast_dir="ewb_precip_forecasts/", output_csv="pre
                     except KeyError:
                         continue
                     
-                    fcst_2d_aurora = aurora_fcst["scaled_tp_1h"].sel(init_time=init_t, lead_time=lt)
+                    current_dt = valid_time
+                    current_lead_time_hours = int((pd.to_datetime(current_dt) - pd.to_datetime(init_t)).total_seconds() / 3600)
+                    fcst_2d_aurora = aurora_fcst["scaled_tp_1h"].sel(
+                        init_time=init_t, 
+                        lead_time=pd.to_timedelta(f"{current_lead_time_hours}h")
+                    )
                     fcst_arr_aurora, tgt_arr_aurora = align_and_subset_2d(fcst_2d_aurora, tgt_2d)
+                    
+                    fcst_arr_aurora = fcst_arr_aurora * 1000.0
+                    tgt_arr_aurora = tgt_arr_aurora * 1000.0
                     
                     metrics_aurora = {
                         "Peak_Amplitude_Error": peak_amplitude_error(fcst_arr_aurora, tgt_arr_aurora),
@@ -304,6 +312,12 @@ def evaluate_precip_events(forecast_dir="ewb_precip_forecasts/", output_csv="pre
                             pass
                         else:
                             fcst_arr_hres, tgt_arr_hres = align_and_subset_2d(fcst_2d_hres, tgt_2d)
+                            
+                            # HRES is 6-hour accumulation (meters). Target is 1-hour accumulation (meters).
+                            # Convert both to mm/h. (HRES / 6 * 1000, Target * 1000)
+                            fcst_arr_hres = (fcst_arr_hres / 6.0) * 1000.0
+                            tgt_arr_hres = tgt_arr_hres * 1000.0
+                            
                             metrics_hres = {
                                 "Peak_Amplitude_Error": peak_amplitude_error(fcst_arr_hres, tgt_arr_hres),
                                 "Conditional_Bias_Extremes": conditional_bias_extremes(fcst_arr_hres, tgt_arr_hres, 95.0),

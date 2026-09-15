@@ -48,12 +48,33 @@ def main():
     era5_case = case.location.mask(era5_case).compute()
     era5_case = standardize_longitude(era5_case)
     
-    nc_files = sorted(list(forecast_dir.glob(f"*_{case.case_id_number}.nc")))
-    if not nc_files:
-        print(f"No Aurora forecast files found for case {case.case_id_number} in {forecast_dir}")
+    all_nc_files = sorted(list(forecast_dir.glob("*.nc")))
+    if not all_nc_files:
+        print(f"No Aurora forecast files found in {forecast_dir}")
         return
+        
+    print(f"Scanning {len(all_nc_files)} prediction files to find overlaps for Case {case.case_id_number}...")
+    nc_files = []
 
-    print(f"Found {len(nc_files)} prediction files for Case {case.case_id_number}.")
+    for nc_file in all_nc_files:
+        try:
+            aurora_fcst = xr.open_dataset(nc_file)
+            init_t = aurora_fcst.init_time.values[0]
+            lead_times = aurora_fcst.lead_time.values
+            valid_times = init_t + lead_times
+            start_dt = pd.to_datetime(case.start_date)
+            end_dt = pd.to_datetime(case.end_date)
+            if np.any((valid_times >= start_dt) & (valid_times <= end_dt)):
+                nc_files.append(nc_file)
+            aurora_fcst.close()
+        except Exception as e:
+            pass
+            
+    if not nc_files:
+        print(f"No overlapping Aurora forecast files found for case {case.case_id_number}.")
+        return
+        
+    print(f"Found {len(nc_files)} prediction files overlapping with Case {case.case_id_number}.")
 
     for nc_file in nc_files:
         print(f"Processing {nc_file.name}...")

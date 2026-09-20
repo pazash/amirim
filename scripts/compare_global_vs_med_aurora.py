@@ -88,16 +88,21 @@ def generate_forecasts(output_dir: str = "med_comparison_forecasts"):
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     cache_dir = Path("weather_data")
     
-    # 5 arbitrary diverse dates across different seasons
+    # 10 arbitrary diverse dates across different seasons
     selected_dates = [
         datetime(2021, 6, 15, 12),
         datetime(2021, 7, 25, 12),
         datetime(2022, 1, 10, 12),
         datetime(2022, 4, 18, 12),
-        datetime(2022, 11, 20, 12)
+        datetime(2022, 11, 20, 12),
+        datetime(2021, 3, 8, 12),
+        datetime(2021, 10, 12, 12),
+        datetime(2022, 8, 5, 12),
+        datetime(2021, 12, 22, 12),
+        datetime(2022, 6, 30, 12),
     ]
     
-    lead_times_h = [24, 72, 120]
+    lead_times_h = [6, 24, 72, 120]
     
     logger.info("Loading Aurora Model for inference...")
     aurora_model = AuroraV1p5()
@@ -149,7 +154,7 @@ def evaluate_forecasts(forecast_dir: str = "med_comparison_forecasts"):
     forecast_path = Path(forecast_dir)
     data_pipeline = AuroraDataLoader(cache_dir=cache_dir)
     
-    lead_times_h = [24, 72, 120]
+    lead_times_h = [6, 24, 72, 120]
     results = []
     
     # Get all unique init times from generated files

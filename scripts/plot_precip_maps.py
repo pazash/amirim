@@ -16,7 +16,7 @@ sys.path.append(str(Path(__file__).resolve().parent))
 from extreme_precip_evaluator import PRECIP_CASES, load_era5_zarr, load_hres_zarr, standardize_longitude
 
 def main():
-    base_dir = Path(__file__).resolve().parent.parent
+    base_dir = Path(__file__).resolve().parent.parent.parent
     forecast_dir = base_dir / "ewb_precip_forecasts"
     
     if not forecast_dir.exists():

@@ -73,37 +73,47 @@ class AuroraDataLoader:
         start_str = required_dts[0].strftime("%Y%m%d_%H")
         end_str = required_dts[-1].strftime("%Y%m%d_%H")
         
-        surf_path = self.cache_dir / f"era5_surf_{start_str}_to_{end_str}.nc"
-        atmos_path = self.cache_dir / f"era5_atmos_{start_str}_to_{end_str}.nc"
-        
         c = cdsapi.Client()
+        
+        # Build requests, adding bounding box area if provided
+        surf_req = {
+            "product_type": "reanalysis",
+            "variable": self.surf_request_vars,
+            "year": years, "month": months, "day": days, "time": times,
+            "data_format": "netcdf",
+        }
+        atmos_req = {
+            "product_type": "reanalysis",
+            "variable": self.atmos_request_vars,
+            "pressure_level": [str(l) for l in self.levels],
+            "year": years, "month": months, "day": days, "time": times,
+            "data_format": "netcdf",
+        }
+        
+        # Determine cache path and apply area filter if bbox is provided
+        if bbox is not None:
+            # Create a completely separate cache directory for regional data
+            regional_cache = self.cache_dir / "regional"
+            regional_cache.mkdir(exist_ok=True)
+            
+            surf_path = regional_cache / f"era5_surf_{start_str}_to_{end_str}.nc"
+            atmos_path = regional_cache / f"era5_atmos_{start_str}_to_{end_str}.nc"
+            
+            # CDS area format: [North, West, South, East]
+            area = [bbox["lat_max"], bbox["lon_min"], bbox["lat_min"], bbox["lon_max"]]
+            surf_req["area"] = area
+            atmos_req["area"] = area
+        else:
+            surf_path = self.cache_dir / f"era5_surf_{start_str}_to_{end_str}.nc"
+            atmos_path = self.cache_dir / f"era5_atmos_{start_str}_to_{end_str}.nc"
 
         if not surf_path.exists():
             print(f"Downloading Surface variables for {start_str} to {end_str}...")
-            c.retrieve(
-                "reanalysis-era5-single-levels",
-                {
-                    "product_type": "reanalysis",
-                    "variable": self.surf_request_vars,
-                    "year": years, "month": months, "day": days, "time": times,
-                    "data_format": "netcdf",
-                },
-                str(surf_path),
-            )
+            c.retrieve("reanalysis-era5-single-levels", surf_req, str(surf_path))
 
         if not atmos_path.exists():
             print(f"Downloading Atmospheric variables for {start_str} to {end_str}...")
-            c.retrieve(
-                "reanalysis-era5-pressure-levels",
-                {
-                    "product_type": "reanalysis",
-                    "variable": self.atmos_request_vars,
-                    "pressure_level": [str(l) for l in self.levels],
-                    "year": years, "month": months, "day": days, "time": times,
-                    "data_format": "netcdf",
-                },
-                str(atmos_path),
-            )
+            c.retrieve("reanalysis-era5-pressure-levels", atmos_req, str(atmos_path))
 
         # .load() immediately pulls the NetCDF into memory, removing the need for .compute() later
         ds_surf = xr.open_dataset(surf_path, engine="netcdf4").load()

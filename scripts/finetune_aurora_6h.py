@@ -79,7 +79,7 @@ def main():
     
     # Load the base model weights
     print("Loading base checkpoint...")
-    model.load_checkpoint("microsoft/aurora", "aurora-0.25-pretrained.ckpt", revision="main")
+    model.load_checkpoint("microsoft/aurora", "aurora-0.25-pretrained.ckpt", revision="main", strict=False)
     model.configure_activation_checkpointing()
     model = model.to(device)
     model.train() # Set to train mode

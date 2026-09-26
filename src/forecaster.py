@@ -45,16 +45,20 @@ class AuroraForecaster:
             fine_lead_times: Sub-hourly outputs per jump. Defaults to hourly [1.0 ... 6.0].
             save_path: Optional path to immediately save the resulting predictions.
         """
-        # Default to Aurora 1.5's hourly sub-step behavior if not provided
-        if fine_lead_times is None:
-            fine_lead_times = [6.0]
+        kwargs = {"steps": steps}
+        if fine_lead_times is not None:
+            kwargs["fine_lead_times"] = fine_lead_times
+        elif getattr(self.model, "variable_lead_time", False):
+            # Default to Aurora 1.5's behavior if not provided and supported
+            kwargs["fine_lead_times"] = [6.0]
 
         current_batch = initial_batch.to(self.device)
-        total_preds = steps * len(fine_lead_times)
+        num_sub_steps = len(kwargs.get("fine_lead_times", [6.0]))
+        total_preds = steps * num_sub_steps
         
         torch.cuda.empty_cache()
 
-        print(f"Starting {steps}-step AR rollout with {len(fine_lead_times)} sub-steps per AR step.")
+        print(f"Starting {steps}-step AR rollout with {num_sub_steps} sub-steps per AR step.")
         print(f"Total generated predictions will be: {total_preds}")
 
         with torch.inference_mode():
@@ -63,8 +67,7 @@ class AuroraForecaster:
                 for pred in rollout(
                     self.model, 
                     current_batch, 
-                    steps=steps, 
-                    fine_lead_times=fine_lead_times
+                    **kwargs
                 )
             ]
                 

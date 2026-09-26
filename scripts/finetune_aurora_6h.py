@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import random
 import sys
 import os
+import traceback
 
 # Ensure src can be imported
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
@@ -139,6 +140,19 @@ def main():
                 
                 input_batch = input_batch.to(device)
                 
+                # Filter batch to only the variables AuroraPretrained expects
+                import dataclasses
+                allowed_surf_vars = ("2t", "10u", "10v", "msl")
+                allowed_static_vars = ("lsm", "z", "slt")
+                allowed_atmos_vars = ("z", "u", "v", "t", "q")
+
+                input_batch = dataclasses.replace(
+                    input_batch,
+                    surf_vars={k: v for k, v in input_batch.surf_vars.items() if k in allowed_surf_vars},
+                    static_vars={k: v for k, v in input_batch.static_vars.items() if k in allowed_static_vars},
+                    atmos_vars={k: v for k, v in input_batch.atmos_vars.items() if k in allowed_atmos_vars}
+                )
+
                 # Forward pass
                 optimizer.zero_grad()
                 pred_batch = model.forward(input_batch)
@@ -160,6 +174,7 @@ def main():
                 
             except Exception as e:
                 print(f"Failed. Error: {e}")
+                traceback.print_exc()
                 
         print(f"Epoch {epoch+1} Average Loss: {epoch_loss / SAMPLES_PER_EPOCH:.4f}")
         

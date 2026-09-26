@@ -108,13 +108,19 @@ def generate_forecasts(output_dir: str = "med_comparison_forecasts"):
     aurora_model = AuroraV1p5()
     aurora_model.load_checkpoint("microsoft/aurora", "aurora-0.25-v1.5.ckpt", revision="main")
     forecaster = AuroraForecaster(model=aurora_model)
-    data_pipeline = AuroraDataLoader(cache_dir=cache_dir)
+    
+    # Create separate DataLoaders per scope to isolate their caches
+    data_pipelines = {
+        scope_name: AuroraDataLoader(cache_dir=cache_dir / scope_name)
+        for scope_name in PREDICTION_SCOPES.keys()
+    }
     
     for init_dt in selected_dates:
         logger.info(f"--- Generating Forecasts for Init Time: {init_dt} ---")
         init_str = init_dt.strftime("%Y%m%d_%H")
         
         for scope_name, bbox in PREDICTION_SCOPES.items():
+            data_pipeline = data_pipelines[scope_name]
             out_file = Path(output_dir) / f"aurora_{scope_name}_{init_str}.nc"
             
             if not out_file.exists():
@@ -152,7 +158,9 @@ def evaluate_forecasts(forecast_dir: str = "med_comparison_forecasts"):
     logger.info("Starting Evaluation...")
     cache_dir = Path("weather_data")
     forecast_path = Path(forecast_dir)
-    data_pipeline = AuroraDataLoader(cache_dir=cache_dir)
+    
+    # Use the "Original" cache dir to fetch ground truth matching the original bounding box
+    data_pipeline = AuroraDataLoader(cache_dir=cache_dir / "Original")
     
     lead_times_h = [6, 24, 72, 120]
     results = []

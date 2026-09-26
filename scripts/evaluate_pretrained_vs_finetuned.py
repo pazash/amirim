@@ -126,13 +126,19 @@ def generate_forecasts(model_type, lora_weights_path=None, output_dir: str = "fi
     
     aurora_model = load_model(model_type, lora_weights_path)
     forecaster = AuroraForecaster(model=aurora_model)
-    data_pipeline = AuroraDataLoader(cache_dir=cache_dir)
+    
+    # Create separate DataLoaders per scope to isolate their caches
+    data_pipelines = {
+        scope_name: AuroraDataLoader(cache_dir=cache_dir / scope_name)
+        for scope_name in PREDICTION_SCOPES.keys()
+    }
     
     for init_dt in selected_dates:
         logger.info(f"--- Generating Forecasts for Init Time: {init_dt} | Model: {model_type} ---")
         init_str = init_dt.strftime("%Y%m%d_%H")
         
         for scope_name, bbox in PREDICTION_SCOPES.items():
+            data_pipeline = data_pipelines[scope_name]
             out_file = Path(output_dir) / f"aurora_{model_type}_{scope_name}_{init_str}.nc"
             
             if not out_file.exists():
@@ -143,8 +149,7 @@ def generate_forecasts(model_type, lora_weights_path=None, output_dir: str = "fi
                     
                     forecast_batches = forecaster.predict_rollout(
                         initial_batch=input_batch,
-                        steps=int(max(lead_times_h) / 6),
-                        fine_lead_times=[6.0]
+                        steps=int(max(lead_times_h) / 6)
                     )
                     del input_batch
                     
@@ -172,7 +177,9 @@ def evaluate_forecasts(output_dir: str = "finetune_comparison_forecasts"):
     logger.info("Starting Evaluation...")
     cache_dir = Path("weather_data")
     forecast_path = Path(output_dir)
-    data_pipeline = AuroraDataLoader(cache_dir=cache_dir)
+    
+    # Use the "Original" cache dir to fetch ground truth matching the original bounding box
+    data_pipeline = AuroraDataLoader(cache_dir=cache_dir / "Original")
     
     lead_times_h = [6, 24, 72, 120]
     results = []

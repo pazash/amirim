@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from huggingface_hub import hf_hub_download
 from aurora import Batch, Metadata
 from aurora.insolation import insolation
+import calendar
 
 
 class AuroraDataLoader:
@@ -15,23 +16,31 @@ class AuroraDataLoader:
     A dedicated class to handle downloading, caching, and formatting 
     ERA5 weather data into Aurora 1.5-compatible PyTorch Batch objects.
     """
-    def __init__(self, cache_dir: Path):
+    def __init__(self, cache_dir: Path, pretrained_only: bool = False):
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.pretrained_only = pretrained_only
+        self.nc_suffix = "_pretrained.nc" if pretrained_only else ".nc"
         
         self.levels = [
             50, 100, 150, 200, 250, 300, 400, 
             500, 600, 700, 850, 925, 1000
         ]
         
-        self.surf_request_vars = [
-            "2m_temperature", "10m_u_component_of_wind", "10m_v_component_of_wind",
-            "mean_sea_level_pressure", "2m_dewpoint_temperature", "total_column_water_vapour",
-            "total_cloud_cover", "100m_u_component_of_wind", "100m_v_component_of_wind",
-            "surface_pressure", "low_cloud_cover", "medium_cloud_cover", "high_cloud_cover",
-            "skin_temperature", "soil_temperature_level_1", "volumetric_soil_water_layer_1",
-            "sea_ice_cover", "snow_depth"
-        ]
+        if self.pretrained_only:
+            self.surf_request_vars = [
+                "2m_temperature", "10m_u_component_of_wind", "10m_v_component_of_wind",
+                "mean_sea_level_pressure"
+            ]
+        else:
+            self.surf_request_vars = [
+                "2m_temperature", "10m_u_component_of_wind", "10m_v_component_of_wind",
+                "mean_sea_level_pressure", "2m_dewpoint_temperature", "total_column_water_vapour",
+                "total_cloud_cover", "100m_u_component_of_wind", "100m_v_component_of_wind",
+                "surface_pressure", "low_cloud_cover", "medium_cloud_cover", "high_cloud_cover",
+                "skin_temperature", "soil_temperature_level_1", "volumetric_soil_water_layer_1",
+                "sea_ice_cover", "snow_depth"
+            ]
         
         self.atmos_request_vars = [
             "temperature", "u_component_of_wind", "v_component_of_wind",
@@ -96,16 +105,16 @@ class AuroraDataLoader:
             regional_cache = self.cache_dir / "regional"
             regional_cache.mkdir(exist_ok=True)
             
-            surf_path = regional_cache / f"era5_surf_{start_str}_to_{end_str}.nc"
-            atmos_path = regional_cache / f"era5_atmos_{start_str}_to_{end_str}.nc"
+            surf_path = regional_cache / f"era5_surf_{start_str}_to_{end_str}{self.nc_suffix}"
+            atmos_path = regional_cache / f"era5_atmos_{start_str}_to_{end_str}{self.nc_suffix}"
             
             # CDS area format: [North, West, South, East]
             area = [bbox["lat_max"], bbox["lon_min"], bbox["lat_min"], bbox["lon_max"]]
             surf_req["area"] = area
             atmos_req["area"] = area
         else:
-            surf_path = self.cache_dir / f"era5_surf_{start_str}_to_{end_str}.nc"
-            atmos_path = self.cache_dir / f"era5_atmos_{start_str}_to_{end_str}.nc"
+            surf_path = self.cache_dir / f"era5_surf_{start_str}_to_{end_str}{self.nc_suffix}"
+            atmos_path = self.cache_dir / f"era5_atmos_{start_str}_to_{end_str}{self.nc_suffix}"
 
         if not surf_path.exists():
             print(f"Downloading Surface variables for {start_str} to {end_str}...")
@@ -257,3 +266,176 @@ class AuroraDataLoader:
         ds = self._fetch_era5_combined(all_required_dts, bbox=bbox)
         
         return self._format_single_sample(ds, input_dts, target_dts, bbox=bbox)
+
+    # ================================================================
+    # Bulk Download Methods — for efficient large-scale training
+    # ================================================================
+
+    def _bulk_cache_dir(self, bbox=None) -> Path:
+        """[INTERNAL] Returns the base cache directory for bulk monthly downloads."""
+        if bbox is not None:
+            bulk_dir = self.cache_dir / "bulk" / "regional"
+        else:
+            bulk_dir = self.cache_dir / "bulk"
+        bulk_dir.mkdir(parents=True, exist_ok=True)
+        return bulk_dir
+
+    def bulk_download_month(self, year: int, month: int, bbox=None) -> None:
+        """
+        [PUBLIC] Downloads all 6-hourly ERA5 data for a single month in one CDS API
+        request. Data is cached as monthly NetCDF files for efficient bulk training.
+
+        This is vastly more efficient than per-sample downloads: 2 API calls per month
+        vs. ~120 per month if downloading per-sample.
+
+        Args:
+            year: Year to download (e.g., 2019).
+            month: Month to download (1-12).
+            bbox: Optional bounding box dict for regional downloads.
+        """
+        days_in_month = calendar.monthrange(year, month)[1]
+
+        bulk_dir = self._bulk_cache_dir(bbox)
+        surf_path = bulk_dir / f"era5_surf_{year}_{month:02d}{self.nc_suffix}"
+        atmos_path = bulk_dir / f"era5_atmos_{year}_{month:02d}{self.nc_suffix}"
+
+        if surf_path.exists() and atmos_path.exists():
+            print(f"  Bulk cache hit: {year}-{month:02d}")
+            return
+
+        c = cdsapi.Client()
+        days = [f"{d:02d}" for d in range(1, days_in_month + 1)]
+        times = ["00:00", "06:00", "12:00", "18:00"]
+
+        surf_req = {
+            "product_type": "reanalysis",
+            "variable": self.surf_request_vars,
+            "year": str(year),
+            "month": f"{month:02d}",
+            "day": days,
+            "time": times,
+            "data_format": "netcdf",
+        }
+        atmos_req = {
+            "product_type": "reanalysis",
+            "variable": self.atmos_request_vars,
+            "pressure_level": [str(l) for l in self.levels],
+            "year": str(year),
+            "month": f"{month:02d}",
+            "day": days,
+            "time": times,
+            "data_format": "netcdf",
+        }
+
+        if bbox is not None:
+            area = [bbox["lat_max"], bbox["lon_min"], bbox["lat_min"], bbox["lon_max"]]
+            surf_req["area"] = area
+            atmos_req["area"] = area
+
+        if not surf_path.exists():
+            print(f"  Downloading surface vars for {year}-{month:02d}...")
+            c.retrieve("reanalysis-era5-single-levels", surf_req, str(surf_path))
+
+        if not atmos_path.exists():
+            print(f"  Downloading atmospheric vars for {year}-{month:02d}...")
+            c.retrieve("reanalysis-era5-pressure-levels", atmos_req, str(atmos_path))
+
+        print(f"  ✓ Downloaded: {year}-{month:02d}")
+
+    def bulk_download_range(self, years, bbox=None) -> None:
+        """
+        [PUBLIC] Downloads all months for the given years using bulk monthly CDS requests.
+        Much more efficient than per-sample downloads for large-scale training.
+
+        Args:
+            years: Iterable of years (e.g., range(2016, 2021) for 2016-2020).
+            bbox: Optional bounding box dict for regional downloads.
+        """
+        years_list = list(years)
+        total_months = len(years_list) * 12
+        count = 0
+        for year in years_list:
+            for month in range(1, 13):
+                count += 1
+                print(f"[{count}/{total_months}] Bulk downloading {year}-{month:02d}...")
+                self.bulk_download_month(year, month, bbox)
+
+    def get_batches_from_bulk(
+        self,
+        t0_dt: datetime,
+        history_steps: int = 1,
+        forecast_steps: int = 1,
+        bbox=None,
+    ) -> tuple:
+        """
+        [PUBLIC] Loads batches from pre-downloaded bulk monthly data.
+
+        Functionally identical to get_batches(), but reads from the bulk monthly
+        cache instead of downloading per-sample. Call bulk_download_range() first.
+
+        Args:
+            t0_dt: The reference forecast datetime (t0).
+            history_steps: How many 6-hour steps backward to include in input.
+            forecast_steps: How many 6-hour steps forward to include in target.
+            bbox: Optional bounding box dict. Must match the bbox used during download.
+        """
+        input_dts = [
+            t0_dt - timedelta(hours=6 * i) for i in range(history_steps, -1, -1)
+        ]
+        target_dts = [
+            t0_dt + timedelta(hours=6 * i) for i in range(1, forecast_steps + 1)
+        ]
+        all_required_dts = sorted(list(set(input_dts + target_dts)))
+
+        # Determine which months we need to load
+        required_months = sorted(set((dt.year, dt.month) for dt in all_required_dts))
+
+        bulk_dir = self._bulk_cache_dir(bbox)
+
+        # Load and merge required months (lazily opened, only selected timestamps loaded)
+        datasets = []
+        for year, month in required_months:
+            surf_path = bulk_dir / f"era5_surf_{year}_{month:02d}{self.nc_suffix}"
+            atmos_path = bulk_dir / f"era5_atmos_{year}_{month:02d}{self.nc_suffix}"
+
+            if not surf_path.exists() or not atmos_path.exists():
+                raise FileNotFoundError(
+                    f"Bulk data for {year}-{month:02d} not found at {bulk_dir}. "
+                    f"Run bulk_download_month({year}, {month}) first."
+                )
+
+            ds_surf = xr.open_dataset(surf_path, engine="netcdf4")
+            ds_atmos = xr.open_dataset(atmos_path, engine="netcdf4")
+            ds_month = xr.merge([ds_surf, ds_atmos], compat="override")
+
+            # Normalize coordinate names before potential concatenation
+            if "valid_time" in ds_month.coords or "valid_time" in ds_month.dims:
+                ds_month = ds_month.rename({"valid_time": "time"})
+            if "pressure_level" in ds_month.coords or "pressure_level" in ds_month.dims:
+                ds_month = ds_month.rename({"pressure_level": "level"})
+
+            datasets.append(ds_month)
+
+        # Merge across months if the sample spans a month boundary
+        if len(datasets) == 1:
+            ds = datasets[0]
+        else:
+            ds = xr.concat(datasets, dim="time")
+
+        # Select exact timestamps and load into memory
+        exact_times = [dt.strftime("%Y-%m-%dT%H:00:00") for dt in all_required_dts]
+        ds = ds.sel(time=exact_times).load()
+
+        # Apply bbox slicing (consistent with _fetch_era5_combined)
+        if bbox is not None:
+            if bbox["lon_min"] > bbox["lon_max"]:
+                part1 = ds.sel(longitude=slice(bbox["lon_min"], 360))
+                part2 = ds.sel(longitude=slice(0, bbox["lon_max"]))
+                part1 = part1.assign_coords(longitude=part1.longitude - 360)
+                ds = xr.concat([part1, part2], dim="longitude")
+            else:
+                ds = ds.sel(longitude=slice(bbox["lon_min"], bbox["lon_max"]))
+
+            ds = ds.sel(latitude=slice(bbox["lat_max"], bbox["lat_min"]))
+
+        return self._format_single_sample(ds, input_dts, target_dts, bbox=bbox)

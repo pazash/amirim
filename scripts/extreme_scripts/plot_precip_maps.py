@@ -13,7 +13,9 @@ warnings.filterwarnings("ignore")
 
 # Import evaluator functions
 sys.path.append(str(Path(__file__).resolve().parent))
-from extreme_precip_evaluator import PRECIP_CASES, load_era5_zarr, load_hres_zarr, standardize_longitude
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+from extreme_precip_evaluator import PRECIP_CASES
+from src.utils import standardize_longitude, load_era5_zarr, load_hres_zarr
 
 def main():
     base_dir = Path(__file__).resolve().parent.parent.parent
@@ -32,8 +34,8 @@ def main():
     case_out_dir.mkdir(parents=True, exist_ok=True)
     
     print(f"Loading ERA5 and HRES for {case.title}...")
-    era5_ds = load_era5_zarr()
-    hres_ds = load_hres_zarr()
+    era5_ds = load_era5_zarr(variable="precipitation")
+    hres_ds = load_hres_zarr(variable="precipitation")
     
     if "total_precipitation_6hr" in hres_ds.data_vars:
         hres_var = "total_precipitation_6hr"

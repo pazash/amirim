@@ -146,7 +146,7 @@ def benchmark():
         rss_before_data = _get_process_rss_mb()
 
         logger.info("Loading input batch …")
-        input_batch, _ = data_pipeline.get_batches(
+        input_batch, _ = data_pipeline.get_batch(
             BENCHMARK_INIT_DT, history_steps=1, forecast_steps=0, bbox=bbox
         )
 

@@ -15,6 +15,7 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.dataloader import AuroraDataLoader
 from src.forecaster import AuroraForecaster
+from src.utils import rmse, aurora_batch_to_xarray, align_and_subset_2d
 from aurora import AuroraV1p5
 
 logger = logging.getLogger(__name__)
@@ -55,33 +56,86 @@ PREDICTION_SCOPES = {
     "Global": None
 }
 
+# Variables to evaluate across scopes
+EVAL_VARIABLES = [
+    {
+        "id": "2t",
+        "name": "2m Surface Temperature",
+        "unit": "K",
+        "type": "surface",
+        "fcst_key": "2t_aurora",
+        "target_key": "t2m",
+    },
+    {
+        "id": "t_850",
+        "name": "Temperature (850 hPa)",
+        "unit": "K",
+        "type": "atmos",
+        "fcst_key": "t",
+        "target_key": "t",
+        "level": 850,
+    },
+    {
+        "id": "t_250",
+        "name": "Temperature (250 hPa)",
+        "unit": "K",
+        "type": "atmos",
+        "fcst_key": "t",
+        "target_key": "t",
+        "level": 250,
+    },
+    {
+        "id": "wind_speed_850",
+        "name": "Wind Speed (850 hPa)",
+        "unit": "m/s",
+        "type": "wind_speed",
+        "level": 850,
+    },
+    {
+        "id": "wind_speed_250",
+        "name": "Wind Speed (250 hPa)",
+        "unit": "m/s",
+        "type": "wind_speed",
+        "level": 250,
+    },
+    {
+        "id": "z_850",
+        "name": "Geopotential (850 hPa)",
+        "unit": "m²/s²",
+        "type": "atmos",
+        "fcst_key": "z",
+        "target_key": "z",
+        "level": 850,
+    },
+    {
+        "id": "z_250",
+        "name": "Geopotential (250 hPa)",
+        "unit": "m²/s²",
+        "type": "atmos",
+        "fcst_key": "z",
+        "target_key": "z",
+        "level": 250,
+    },
+    {
+        "id": "q_850",
+        "name": "Specific Humidity (850 hPa)",
+        "unit": "kg/kg",
+        "type": "atmos",
+        "fcst_key": "q",
+        "target_key": "q",
+        "level": 850,
+    },
+    {
+        "id": "q_250",
+        "name": "Specific Humidity (250 hPa)",
+        "unit": "kg/kg",
+        "type": "atmos",
+        "fcst_key": "q",
+        "target_key": "q",
+        "level": 250,
+    },
+]
 
-def rmse(forecast_2d: np.ndarray, target_2d: np.ndarray) -> float:
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    diff = forecast_2d - target_2d
-    return float(np.sqrt(np.nanmean(diff**2)))
-
-def aurora_batch_to_xarray(predicted_batch, init_time, lead_time_hours):
-    t2m_tensor = predicted_batch.surf_vars["2t"].detach().cpu().numpy().squeeze()
-    lats = predicted_batch.metadata.lat
-    lons = predicted_batch.metadata.lon
-    ds = xr.Dataset(
-        data_vars={
-            "2t_aurora": (["latitude", "longitude"], t2m_tensor),
-        },
-        coords={
-            "init_time": [pd.to_datetime(init_time)],
-            "lead_time": pd.to_timedelta([f"{lead_time_hours}h"]),
-            "latitude": lats,
-            "longitude": lons,
-        }
-    )
-    return ds
-
-def align_and_subset_2d(fcst_da: xr.DataArray, tgt_da: xr.DataArray) -> tuple[np.ndarray, np.ndarray]:
-    fcst_sub = fcst_da.interp_like(tgt_da, method="nearest", kwargs={"fill_value": "extrapolate"})
-    return fcst_sub.values, tgt_da.values
 
 def generate_forecasts(output_dir: str = "med_comparison_forecasts"):
     """Runs Aurora predictions and saves them to NetCDF."""
@@ -123,10 +177,20 @@ def generate_forecasts(output_dir: str = "med_comparison_forecasts"):
             data_pipeline = data_pipelines[scope_name]
             out_file = Path(output_dir) / f"aurora_{scope_name}_{init_str}.nc"
             
-            if not out_file.exists():
+            # Check if file exists and has atmospheric variables
+            file_valid = False
+            if out_file.exists():
+                try:
+                    with xr.open_dataset(out_file) as test_ds:
+                        if "t" in test_ds and "u" in test_ds:
+                            file_valid = True
+                except Exception:
+                    file_valid = False
+
+            if not file_valid:
                 logger.info(f"Running Aurora for scope: {scope_name}...")
                 try:
-                    input_batch, _ = data_pipeline.get_batches(init_dt, history_steps=1, forecast_steps=0, bbox=bbox)
+                    input_batch, _ = data_pipeline.get_batch(init_dt, history_steps=1, forecast_steps=0, bbox=bbox)
                     forecast_batches = forecaster.predict_rollout(
                         initial_batch=input_batch,
                         steps=int(max(lead_times_h) / 6),
@@ -134,12 +198,19 @@ def generate_forecasts(output_dir: str = "med_comparison_forecasts"):
                     )
                     del input_batch
                     
-                    # Combine and save
+                    # Combine and save with atmospheric variables at 250 & 850 hPa
                     ds_list = []
                     for lt_h in lead_times_h:
                         step_idx = int(lt_h / 6) - 1
                         batch = forecast_batches[step_idx]
-                        ds_list.append(aurora_batch_to_xarray(batch, init_dt, lt_h))
+                        ds_list.append(aurora_batch_to_xarray(
+                            batch,
+                            init_dt,
+                            lt_h,
+                            include_atmos=True,
+                            atmos_levels=[250, 850],
+                            atmos_vars=["t", "u", "v", "z", "q"],
+                        ))
                     
                     xr.concat(ds_list, dim="lead_time").to_netcdf(out_file, engine='h5netcdf')
                     del forecast_batches
@@ -147,14 +218,17 @@ def generate_forecasts(output_dir: str = "med_comparison_forecasts"):
                 except Exception as e:
                     logger.error(f"{scope_name} run failed for {init_dt}: {e}")
             else:
-                logger.info(f"{scope_name} forecast for {init_dt} already exists.")
+                logger.info(f"{scope_name} forecast for {init_dt} already exists with atmospheric variables.")
                 
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-def evaluate_forecasts(forecast_dir: str = "med_comparison_forecasts"):
-    """Evaluates the saved forecasts against ERA5 strictly on the ORIGINAL bounding box."""
+def evaluate_forecasts(
+    forecast_dir: str = "med_comparison_forecasts",
+    output_csv: str = "aurora_context_comparison_rmse.csv"
+):
+    """Evaluates the saved forecasts against ERA5 strictly on the ORIGINAL bounding box across all variables."""
     logger.info("Starting Evaluation...")
     cache_dir = Path("weather_data")
     forecast_path = Path(forecast_dir)
@@ -185,7 +259,7 @@ def evaluate_forecasts(forecast_dir: str = "med_comparison_forecasts"):
         # Ground Truth (ERA5 strictly on Original Med bbox)
         target_dts = [init_dt + timedelta(hours=lt) for lt in lead_times_h]
         try:
-            target_ds = data_pipeline._fetch_era5_combined(target_dts, bbox=ORIGINAL_MED_BBOX)
+            target_ds = data_pipeline.fetch_era5(target_dts, bbox=ORIGINAL_MED_BBOX)
         except Exception as e:
             logger.error(f"Failed to load target data for {init_dt}: {e}")
             continue
@@ -206,39 +280,93 @@ def evaluate_forecasts(forecast_dir: str = "med_comparison_forecasts"):
             for lt_h in lead_times_h:
                 valid_dt = init_dt + timedelta(hours=lt_h)
                 valid_dt_str = valid_dt.strftime("%Y-%m-%dT%H:00:00")
-                
-                try:
-                    tgt_2d = target_ds["t2m"].sel(time=valid_dt_str)
-                except KeyError:
-                    logger.warning(f"Target data missing for {valid_dt_str}, skipping.")
-                    continue
-                    
-                # Evaluate on Original Box
-                fcst_2d = scope_ds["2t_aurora"].sel(lead_time=pd.to_timedelta(f"{lt_h}h")).squeeze()
-                fcst_cropped = fcst_2d.sel(
-                    latitude=slice(ORIGINAL_MED_BBOX["lat_max"], ORIGINAL_MED_BBOX["lat_min"]),
-                    longitude=slice(ORIGINAL_MED_BBOX["lon_min"], ORIGINAL_MED_BBOX["lon_max"])
-                )
-                fcst_arr, tgt_arr = align_and_subset_2d(fcst_cropped, tgt_2d)
-                rmse_val = rmse(fcst_arr, tgt_arr)
-                
-                logger.info(f"Lead time {lt_h}h | Model: {scope_name} | RMSE: {rmse_val:.3f}")
-                
-                results.append({
-                    "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "valid_time": valid_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                    "lead_time_hours": lt_h,
-                    "metric": "RMSE",
-                    "model": f"Aurora_{scope_name}",
-                    "value": rmse_val
-                })
-                
+                lt_delta = pd.to_timedelta(f"{lt_h}h")
+
+                for var_cfg in EVAL_VARIABLES:
+                    var_id = var_cfg["id"]
+                    try:
+                        # 1. Target DataArray
+                        if var_cfg["type"] == "surface":
+                            if var_cfg["target_key"] not in target_ds:
+                                logger.warning(f"Target variable {var_cfg['target_key']} missing for {valid_dt_str}")
+                                continue
+                            tgt_2d = target_ds[var_cfg["target_key"]].sel(time=valid_dt_str)
+                        elif var_cfg["type"] == "atmos":
+                            if var_cfg["target_key"] not in target_ds:
+                                logger.warning(f"Target variable {var_cfg['target_key']} missing for {valid_dt_str}")
+                                continue
+                            tgt_2d = target_ds[var_cfg["target_key"]].sel(
+                                time=valid_dt_str, level=var_cfg["level"], method="nearest"
+                            ).squeeze()
+                        elif var_cfg["type"] == "wind_speed":
+                            if "u" not in target_ds or "v" not in target_ds:
+                                logger.warning(f"Target u/v missing for {valid_dt_str}")
+                                continue
+                            tgt_u = target_ds["u"].sel(
+                                time=valid_dt_str, level=var_cfg["level"], method="nearest"
+                            ).squeeze()
+                            tgt_v = target_ds["v"].sel(
+                                time=valid_dt_str, level=var_cfg["level"], method="nearest"
+                            ).squeeze()
+                            tgt_2d = np.sqrt(tgt_u**2 + tgt_v**2)
+
+                        # 2. Forecast DataArray
+                        if var_cfg["type"] == "surface":
+                            fcst_key = var_cfg["fcst_key"] if var_cfg["fcst_key"] in scope_ds else "2t"
+                            if fcst_key not in scope_ds:
+                                logger.warning(f"Forecast key {fcst_key} missing in {scope_file.name}")
+                                continue
+                            fcst_2d = scope_ds[fcst_key].sel(lead_time=lt_delta).squeeze()
+                        elif var_cfg["type"] == "atmos":
+                            fcst_key = var_cfg["fcst_key"]
+                            if fcst_key not in scope_ds:
+                                logger.warning(f"Forecast key {fcst_key} missing in {scope_file.name}")
+                                continue
+                            fcst_2d = scope_ds[fcst_key].sel(
+                                lead_time=lt_delta, level=var_cfg["level"], method="nearest"
+                            ).squeeze()
+                        elif var_cfg["type"] == "wind_speed":
+                            if "u" not in scope_ds or "v" not in scope_ds:
+                                logger.warning(f"Forecast u/v missing in {scope_file.name}")
+                                continue
+                            fcst_u = scope_ds["u"].sel(
+                                lead_time=lt_delta, level=var_cfg["level"], method="nearest"
+                            ).squeeze()
+                            fcst_v = scope_ds["v"].sel(
+                                lead_time=lt_delta, level=var_cfg["level"], method="nearest"
+                            ).squeeze()
+                            fcst_2d = np.sqrt(fcst_u**2 + fcst_v**2)
+
+                        # 3. Crop to Original Med Box and compute RMSE
+                        fcst_cropped = fcst_2d.sel(
+                            latitude=slice(ORIGINAL_MED_BBOX["lat_max"], ORIGINAL_MED_BBOX["lat_min"]),
+                            longitude=slice(ORIGINAL_MED_BBOX["lon_min"], ORIGINAL_MED_BBOX["lon_max"])
+                        )
+                        fcst_arr, tgt_arr = align_and_subset_2d(fcst_cropped, tgt_2d)
+                        rmse_val = rmse(fcst_arr, tgt_arr)
+
+                        logger.info(
+                            f"Lead time {lt_h:3d}h | Variable: {var_id:<15} | Model: {scope_name:<15} | RMSE: {rmse_val:.4f} {var_cfg['unit']}"
+                        )
+
+                        results.append({
+                            "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                            "valid_time": valid_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                            "lead_time_hours": lt_h,
+                            "variable": var_id,
+                            "metric": "RMSE",
+                            "model": f"Aurora_{scope_name}",
+                            "value": rmse_val
+                        })
+                    except Exception as e:
+                        logger.error(f"Error evaluating {var_id} for {scope_name} at {lt_h}h ({valid_dt_str}): {e}")
+
             scope_ds.close()
 
     if results:
         df = pd.DataFrame(results)
-        df.to_csv("aurora_context_comparison_rmse.csv", index=False)
-        logger.info("Saved results to aurora_context_comparison_rmse.csv")
+        df.to_csv(output_csv, index=False)
+        logger.info(f"Saved results to {output_csv}")
     else:
         logger.warning("No results to save.")
 

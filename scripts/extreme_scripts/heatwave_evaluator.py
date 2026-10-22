@@ -19,6 +19,20 @@ warnings.filterwarnings("ignore", message="Mean of empty slice")
 
 import extremeweatherbench as ewb
 
+import sys
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+from src.utils import (
+    peak_amplitude_error,
+    conditional_bias_extremes,
+    rmse,
+    intersection_over_union,
+    extreme_area_ratio,
+    standardize_longitude,
+    load_era5_zarr,
+    load_hres_zarr,
+    align_and_subset_2d,
+)
+
 logger = logging.getLogger(__name__)
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
@@ -28,111 +42,6 @@ logging.basicConfig(
 os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "false"
 os.environ["GCSFS_TOKEN"] = "anon"
 
-# =============================================================================
-# Section 1: Pure Metric Functions
-# =============================================================================
-# All metric functions take a 2D numpy/dask array of forecast and target data 
-# on the exact same spatial grid and return a float scalar.
-
-
-def peak_amplitude_error(forecast_2d: np.ndarray, target_2d: np.ndarray) -> float:
-    """max(forecast) - max(target) over spatial domain."""
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    return float(np.nanmax(forecast_2d) - np.nanmax(target_2d))
-
-
-def conditional_bias_extremes(
-    forecast_2d: np.ndarray, target_2d: np.ndarray, percentile: float = 90.0
-) -> float:
-    """mean(f - o) where o >= Q_percentile."""
-    if np.isnan(target_2d).all():
-        return np.nan
-    threshold = np.nanpercentile(target_2d, percentile)
-    mask = target_2d >= threshold
-    if not np.any(mask):
-        return np.nan
-    return float(np.nanmean(forecast_2d[mask] - target_2d[mask]))
-
-
-def rmse(forecast_2d: np.ndarray, target_2d: np.ndarray) -> float:
-    """Root mean squared error over spatial domain."""
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    diff = forecast_2d - target_2d
-    return float(np.sqrt(np.nanmean(diff**2)))
-
-
-def intersection_over_union(
-    forecast_2d: np.ndarray, target_2d: np.ndarray, percentile: float = 90.0
-) -> float:
-    """IoU of areas exceeding Q_percentile threshold."""
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    threshold = np.nanpercentile(target_2d, percentile)
-    f_mask = forecast_2d >= threshold
-    t_mask = target_2d >= threshold
-    
-    intersection = (f_mask & t_mask).sum()
-    union = (f_mask | t_mask).sum()
-    return float(intersection / union) if union > 0 else np.nan
-
-
-def extreme_area_ratio(
-    forecast_2d: np.ndarray, target_2d: np.ndarray, percentile: float = 90.0
-) -> float:
-    """Ratio of extreme area: count(f >= Q) / count(o >= Q)."""
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    threshold = np.nanpercentile(target_2d, percentile)
-    t_count = (target_2d >= threshold).sum()
-    if t_count == 0:
-        return np.nan
-    f_count = (forecast_2d >= threshold).sum()
-    return float(f_count / t_count)
-
-
-# =============================================================================
-# Section 2: Data Loading & Memory-Efficient Alignment Helpers
-# =============================================================================
-
-
-def standardize_longitude(ds: xr.Dataset) -> xr.Dataset:
-    """Standardize dataset longitude to [0, 360] and sort coordinates."""
-    if "longitude" in ds.coords:
-        new_lon = ds["longitude"] % 360
-        ds = ds.assign_coords(longitude=new_lon)
-        ds = ds.sortby("longitude")
-    return ds
-
-
-def load_era5_zarr() -> xr.Dataset:
-    """Load ARCO ERA5 zarr store. Returns the full lazy dataset."""
-    logger.info("Connecting to ARCO ERA5 zarr store...")
-    ds = xr.open_zarr(
-        "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
-        storage_options={"token": "anon"},
-    )
-    # ERA5 ARCO variables
-    ds = ds.rename({"2m_temperature": "surface_air_temperature"})
-    return ds[["surface_air_temperature"]]
-
-
-def load_hres_zarr() -> xr.Dataset:
-    """Load HRES WeatherBench2 zarr store. Returns the full lazy dataset."""
-    logger.info("Connecting to HRES WeatherBench2 zarr store...")
-    ds = xr.open_zarr(
-        "gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr",
-        storage_options={"token": "anon"},
-    )
-    ds = ds.rename(
-        {
-            "2m_temperature": "surface_air_temperature",
-            "prediction_timedelta": "lead_time",
-            "time": "init_time",
-        }
-    )
-    return ds[["surface_air_temperature"]]
 
 
 def get_aurora_files(forecast_dir: str = "ewb_forecasts") -> list[Path]:
@@ -147,16 +56,6 @@ def get_aurora_files(forecast_dir: str = "ewb_forecasts") -> list[Path]:
     return nc_files
 
 
-def align_and_subset_2d(
-    fcst_da: xr.DataArray,
-    tgt_da: xr.DataArray,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Align forecast to the target grid."""
-    # Both arrays are already standardized and spatially subsetted to the bounding box.
-    # We just need to align their exact grid points.
-    fcst_sub = fcst_da.interp_like(tgt_da, method="nearest", kwargs={"fill_value": "extrapolate"})
-    
-    return fcst_sub.values, tgt_da.values
 
 
 # =============================================================================

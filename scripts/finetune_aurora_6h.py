@@ -17,6 +17,9 @@ from datetime import datetime, timedelta
 # Ensure src can be imported
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.dataloader import AuroraDataLoader
+from src.utils import filter_batch_for_pretrained
+
+filter_batch = filter_batch_for_pretrained
 
 # ==================== Configuration ====================
 CACHE_DIR = Path(".cache/era5")
@@ -172,16 +175,6 @@ def generate_val_dates(year, dates_per_month, seed=123):
     return sorted(val_dates)
 
 
-# ==================== Helpers ====================
-
-def filter_batch(input_batch):
-    """Filter batch to only the variables AuroraPretrained expects."""
-    return dataclasses.replace(
-        input_batch,
-        surf_vars={k: v for k, v in input_batch.surf_vars.items() if k in ALLOWED_SURF_VARS},
-        static_vars={k: v for k, v in input_batch.static_vars.items() if k in ALLOWED_STATIC_VARS},
-        atmos_vars={k: v for k, v in input_batch.atmos_vars.items() if k in ALLOWED_ATMOS_VARS},
-    )
 
 
 @torch.no_grad()
@@ -196,7 +189,7 @@ def validate(model, dataloader, val_dates, device):
     
     for dt in val_dates:
         try:
-            input_batch, target_batch = dataloader.get_batches_from_bulk(
+            input_batch, target_batch = dataloader.get_batch(
                 t0_dt=dt, history_steps=1, forecast_steps=1, bbox=BBOX
             )
             input_batch = filter_batch(input_batch).to(device)
@@ -320,7 +313,7 @@ def main():
         for i, dt in enumerate(train_dates):
             try:
                 # Load sample from bulk cache
-                input_batch, target_batch = dataloader.get_batches_from_bulk(
+                input_batch, target_batch = dataloader.get_batch(
                     t0_dt=dt, history_steps=1, forecast_steps=1, bbox=BBOX
                 )
                 input_batch = filter_batch(input_batch).to(device)

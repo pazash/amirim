@@ -17,6 +17,12 @@ import sys
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.dataloader import AuroraDataLoader
 from src.forecaster import AuroraForecaster
+from src.utils import (
+    rmse,
+    aurora_batch_to_xarray,
+    align_and_subset_2d,
+    filter_batch_for_pretrained,
+)
 from aurora import AuroraPretrained
 
 logger = logging.getLogger(__name__)
@@ -40,45 +46,6 @@ PREDICTION_SCOPES = {
     },
     "Global": None
 }
-
-def rmse(forecast_2d: np.ndarray, target_2d: np.ndarray) -> float:
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    diff = forecast_2d - target_2d
-    return float(np.sqrt(np.nanmean(diff**2)))
-
-def aurora_batch_to_xarray(predicted_batch, init_time, lead_time_hours):
-    t2m_tensor = predicted_batch.surf_vars["2t"].detach().cpu().numpy().squeeze()
-    lats = predicted_batch.metadata.lat
-    lons = predicted_batch.metadata.lon
-    ds = xr.Dataset(
-        data_vars={
-            "2t_aurora": (["latitude", "longitude"], t2m_tensor),
-        },
-        coords={
-            "init_time": [pd.to_datetime(init_time)],
-            "lead_time": pd.to_timedelta([f"{lead_time_hours}h"]),
-            "latitude": lats,
-            "longitude": lons,
-        }
-    )
-    return ds
-
-def align_and_subset_2d(fcst_da: xr.DataArray, tgt_da: xr.DataArray) -> tuple[np.ndarray, np.ndarray]:
-    fcst_sub = fcst_da.interp_like(tgt_da, method="nearest", kwargs={"fill_value": "extrapolate"})
-    return fcst_sub.values, tgt_da.values
-
-def filter_batch_for_pretrained(batch):
-    allowed_surf_vars = ("2t", "10u", "10v", "msl")
-    allowed_static_vars = ("lsm", "z", "slt")
-    allowed_atmos_vars = ("z", "u", "v", "t", "q")
-
-    return dataclasses.replace(
-        batch,
-        surf_vars={k: v for k, v in batch.surf_vars.items() if k in allowed_surf_vars},
-        static_vars={k: v for k, v in batch.static_vars.items() if k in allowed_static_vars},
-        atmos_vars={k: v for k, v in batch.atmos_vars.items() if k in allowed_atmos_vars}
-    )
 
 def load_model(model_type, lora_weights_path=None):
     if model_type == "pretrained":
@@ -144,7 +111,7 @@ def generate_forecasts(model_type, lora_weights_path=None, output_dir: str = "fi
             if not out_file.exists():
                 logger.info(f"Running Aurora for scope: {scope_name}...")
                 try:
-                    input_batch, _ = data_pipeline.get_batches(init_dt, history_steps=1, forecast_steps=0, bbox=bbox)
+                    input_batch, _ = data_pipeline.get_batch(init_dt, history_steps=1, forecast_steps=0, bbox=bbox)
                     input_batch = filter_batch_for_pretrained(input_batch)
                     
                     forecast_batches = forecaster.predict_rollout(
@@ -204,7 +171,7 @@ def evaluate_forecasts(output_dir: str = "finetune_comparison_forecasts"):
         # Ground Truth (ERA5 strictly on Original Med bbox)
         target_dts = [init_dt + timedelta(hours=lt) for lt in lead_times_h]
         try:
-            target_ds = data_pipeline._fetch_era5_combined(target_dts, bbox=ORIGINAL_MED_BBOX)
+            target_ds = data_pipeline.fetch_era5(target_dts, bbox=ORIGINAL_MED_BBOX)
         except Exception as e:
             logger.error(f"Failed to load target data for {init_dt}: {e}")
             continue

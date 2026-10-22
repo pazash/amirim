@@ -119,7 +119,7 @@ def main(forecast_dir: str = "med_comparison_forecasts"):
 
     target_dts = [init_dt + timedelta(hours=lt) for lt in LEAD_TIMES_H]
     logger.info("Loading ERA5 ground truth …")
-    target_ds = data_pipeline._fetch_era5_combined(target_dts, bbox=ORIGINAL_MED_BBOX)
+    target_ds = data_pipeline.fetch_era5(target_dts, bbox=ORIGINAL_MED_BBOX)
 
     # --- Load all scope forecasts ---
     scope_datasets: dict[str, xr.Dataset] = {}

@@ -30,6 +30,7 @@ import xarray as xr
 
 sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.dataloader import AuroraDataLoader
+from src.utils import rmse
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -43,11 +44,6 @@ ORIGINAL_MED_BBOX = {
 }
 
 LEAD_TIMES_H = [6, 24, 72, 120]
-
-
-def rmse(a: np.ndarray, b: np.ndarray) -> float:
-    diff = a - b
-    return float(np.sqrt(np.nanmean(diff ** 2)))
 
 
 def main():
@@ -77,12 +73,12 @@ def main():
         logger.info(f"Processing {init_dt} …")
 
         # ERA5 at init time (for persistence)
-        init_ds = data_pipeline._fetch_era5_combined([init_dt], bbox=ORIGINAL_MED_BBOX)
+        init_ds = data_pipeline.fetch_era5([init_dt], bbox=ORIGINAL_MED_BBOX)
         init_t2m = init_ds["t2m"].sel(time=init_dt.strftime("%Y-%m-%dT%H:00:00")).values
 
         # ERA5 at each valid time (ground truth)
         target_dts = [init_dt + timedelta(hours=lt) for lt in LEAD_TIMES_H]
-        target_ds = data_pipeline._fetch_era5_combined(target_dts, bbox=ORIGINAL_MED_BBOX)
+        target_ds = data_pipeline.fetch_era5(target_dts, bbox=ORIGINAL_MED_BBOX)
 
         for lt_h in LEAD_TIMES_H:
             valid_dt = init_dt + timedelta(hours=lt_h)

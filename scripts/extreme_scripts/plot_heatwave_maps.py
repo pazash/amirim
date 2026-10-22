@@ -13,8 +13,8 @@ import extremeweatherbench as ewb
 warnings.filterwarnings("ignore")
 
 # Import evaluator functions
-sys.path.append(str(Path(__file__).resolve().parent))
-from heatwave_evaluator import load_era5_zarr, load_hres_zarr, standardize_longitude
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+from src.utils import load_era5_zarr, load_hres_zarr, standardize_longitude
 
 def main():
     base_dir = Path(__file__).resolve().parent.parent

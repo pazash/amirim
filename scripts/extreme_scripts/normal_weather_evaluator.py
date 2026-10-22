@@ -29,112 +29,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 
 
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 from src.dataloader import AuroraDataLoader
 from src.forecaster import AuroraForecaster
+from src.utils import (
+    peak_amplitude_error,
+    conditional_bias_extremes,
+    rmse,
+    intersection_over_union,
+    extreme_area_ratio,
+    standardize_longitude,
+    load_era5_zarr,
+    load_hres_zarr,
+    align_and_subset_2d,
+    aurora_batch_to_xarray,
+)
 from aurora import AuroraV1p5
 
-# =============================================================================
-# Section 1: Pure Metric Functions
-# =============================================================================
-
-def peak_amplitude_error(forecast_2d: np.ndarray, target_2d: np.ndarray) -> float:
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    return float(np.nanmax(forecast_2d) - np.nanmax(target_2d))
-
-def conditional_bias_extremes(forecast_2d: np.ndarray, target_2d: np.ndarray, percentile: float = 90.0) -> float:
-    if np.isnan(target_2d).all():
-        return np.nan
-    threshold = np.nanpercentile(target_2d, percentile)
-    mask = target_2d >= threshold
-    if not np.any(mask):
-        return np.nan
-    return float(np.nanmean(forecast_2d[mask] - target_2d[mask]))
-
-def rmse(forecast_2d: np.ndarray, target_2d: np.ndarray) -> float:
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    diff = forecast_2d - target_2d
-    return float(np.sqrt(np.nanmean(diff**2)))
-
-def intersection_over_union(forecast_2d: np.ndarray, target_2d: np.ndarray, percentile: float = 90.0) -> float:
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    threshold = np.nanpercentile(target_2d, percentile)
-    f_mask = forecast_2d >= threshold
-    t_mask = target_2d >= threshold
-    
-    intersection = (f_mask & t_mask).sum()
-    union = (f_mask | t_mask).sum()
-    return float(intersection / union) if union > 0 else np.nan
-
-def extreme_area_ratio(forecast_2d: np.ndarray, target_2d: np.ndarray, percentile: float = 90.0) -> float:
-    if np.isnan(target_2d).all() or np.isnan(forecast_2d).all():
-        return np.nan
-    threshold = np.nanpercentile(target_2d, percentile)
-    t_count = (target_2d >= threshold).sum()
-    if t_count == 0:
-        return np.nan
-    f_count = (forecast_2d >= threshold).sum()
-    return float(f_count / t_count)
-
-# =============================================================================
-# Section 2: Data Loading & Memory-Efficient Alignment Helpers
-# =============================================================================
-
-def standardize_longitude(ds: xr.Dataset) -> xr.Dataset:
-    if "longitude" in ds.coords:
-        new_lon = ds["longitude"] % 360
-        ds = ds.assign_coords(longitude=new_lon)
-        ds = ds.sortby("longitude")
-    return ds
-
-def load_era5_zarr() -> xr.Dataset:
-    logger.info("Connecting to ARCO ERA5 zarr store...")
-    ds = xr.open_zarr(
-        "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
-        storage_options={"token": "anon"},
-    )
-    ds = ds.rename({"2m_temperature": "surface_air_temperature"})
-    return ds[["surface_air_temperature"]]
-
-def load_hres_zarr() -> xr.Dataset:
-    logger.info("Connecting to HRES WeatherBench2 zarr store...")
-    ds = xr.open_zarr(
-        "gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr",
-        storage_options={"token": "anon"},
-    )
-    ds = ds.rename(
-        {
-            "2m_temperature": "surface_air_temperature",
-            "prediction_timedelta": "lead_time",
-            "time": "init_time",
-        }
-    )
-    return ds[["surface_air_temperature"]]
-
-def align_and_subset_2d(fcst_da: xr.DataArray, tgt_da: xr.DataArray) -> tuple[np.ndarray, np.ndarray]:
-    fcst_sub = fcst_da.interp_like(tgt_da, method="nearest", kwargs={"fill_value": "extrapolate"})
-    return fcst_sub.values, tgt_da.values
-
-def aurora_batch_to_xarray(predicted_batch, init_time, lead_time_hours):
-    t2m_tensor = predicted_batch.surf_vars["2t"].detach().cpu().numpy().squeeze()
-    lats = predicted_batch.metadata.lat
-    lons = predicted_batch.metadata.lon
-    ds = xr.Dataset(
-        data_vars={
-            "2t_aurora": (["init_time", "lead_time", "latitude", "longitude"], 
-                          t2m_tensor[np.newaxis, np.newaxis, :, :]),
-        },
-        coords={
-            "init_time": [pd.to_datetime(init_time)],
-            "lead_time": pd.to_timedelta([f"{lead_time_hours}h"]),
-            "latitude": lats,
-            "longitude": lons,
-        }
-    )
-    return ds
 
 def get_normal_dates(case, all_extreme_years, num_years=3):
     event_start = pd.to_datetime(case.start_date)
@@ -196,7 +107,7 @@ def generate_normal_forecasts(output_dir="normal_forecasts/"):
         logger.info(f"Processing: Normal baseline for {case.title} | Init: {init_time} | Start Lead: {start_lead}h")
 
         try:
-            input_batch, _ = data_pipeline.get_batches(
+            input_batch, _ = data_pipeline.get_batch(
                     init_time, 
                     history_steps=1, 
                     forecast_steps=0,

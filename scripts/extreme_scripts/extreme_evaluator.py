@@ -8,44 +8,15 @@ import pandas as pd
 import numpy as np
 import extremeweatherbench as ewb
 from pathlib import Path
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).resolve().parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
 
 from src.dataloader import AuroraDataLoader
 from src.forecaster import AuroraForecaster
+from src.utils import aurora_batch_to_xarray
 from aurora import AuroraV1p5
 import aiohttp
 
 
-# --- 1. Helper Function: Convert Aurora Batch to Xarray Dataset ---
-def aurora_batch_to_xarray(predicted_batch, init_time, lead_time_hours):
-    """
-    Converts a single PyTorch Aurora Batch object into an EWB-compatible xarray Dataset.
-    """
-    # Extract the surface temperature tensor and move to CPU/numpy
-    # Assuming the variable is named "2t" and the shape is [lat, lon]
-    t2m_tensor = predicted_batch.surf_vars["2t"].detach().cpu().numpy().squeeze()
-    
-    # Define the standard 0.25-degree grid
-    lats = predicted_batch.metadata.lat
-    lons = predicted_batch.metadata.lon
-    
-    # Create the xarray Dataset with exact EWB required dimensions
-    ds = xr.Dataset(
-        data_vars={
-            # Keep the name '2t_aurora', we will map it during evaluation
-            "2t_aurora": (["init_time", "lead_time", "latitude", "longitude"], 
-                          t2m_tensor[np.newaxis, np.newaxis, :, :]),
-        },
-        coords={
-            "init_time": [pd.to_datetime(init_time)],
-            "lead_time": pd.to_timedelta([f"{lead_time_hours}h"]),
-            "latitude": lats,
-            "longitude": lons,
-        }
-    )
-    return ds
 
 
 # --- 2. Main Generation Loop ---
@@ -84,7 +55,7 @@ def generate_heatwave_forecasts(output_dir="ewb_forecasts/"):
             print(f"Processing: {case.title} | Init: {init_time} | Start Lead: {start_lead}h | Duration: {event_duration_hours}h")
 
             try:
-                input_batch, _ = data_pipeline.get_batches(
+                input_batch, _ = data_pipeline.get_batch(
                         init_time, 
                         history_steps=1, 
                         forecast_steps=0,

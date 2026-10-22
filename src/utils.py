@@ -144,20 +144,13 @@ def aurora_batch_to_xarray(
         data_vars[var_name] = data_vars[out_var_name]
 
     if include_atmos and hasattr(predicted_batch, "atmos_vars") and predicted_batch.atmos_vars:
-        avail_levels = list(predicted_batch.metadata.atmos_levels)
-        if atmos_levels is None:
-            sel_levels = avail_levels
-        else:
-            sel_levels = [lvl for lvl in atmos_levels if lvl in avail_levels]
+        sel_levels = atmos_levels
 
-        if atmos_vars is None:
-            sel_vars = list(predicted_batch.atmos_vars.keys())
-        else:
-            sel_vars = [v for v in atmos_vars if v in predicted_batch.atmos_vars]
+        sel_vars = atmos_vars
 
         if sel_levels and sel_vars:
             coords["level"] = sel_levels
-            lvl_indices = [avail_levels.index(lvl) for lvl in sel_levels]
+            lvl_indices = [list(predicted_batch.metadata.atmos_levels).index(lvl) for lvl in sel_levels]
             for v_key in sel_vars:
                 raw_atmos = predicted_batch.atmos_vars[v_key].detach().cpu().numpy().squeeze()
                 # raw_atmos shape is (len(avail_levels), H, W)

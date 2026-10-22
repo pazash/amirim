@@ -1,4 +1,3 @@
-import os
 import re
 import logging
 from pathlib import Path
@@ -284,83 +283,80 @@ def evaluate_forecasts(
 
                 for var_cfg in EVAL_VARIABLES:
                     var_id = var_cfg["id"]
-                    try:
-                        # 1. Target DataArray
-                        if var_cfg["type"] == "surface":
-                            if var_cfg["target_key"] not in target_ds:
-                                logger.warning(f"Target variable {var_cfg['target_key']} missing for {valid_dt_str}")
-                                continue
-                            tgt_2d = target_ds[var_cfg["target_key"]].sel(time=valid_dt_str)
-                        elif var_cfg["type"] == "atmos":
-                            if var_cfg["target_key"] not in target_ds:
-                                logger.warning(f"Target variable {var_cfg['target_key']} missing for {valid_dt_str}")
-                                continue
-                            tgt_2d = target_ds[var_cfg["target_key"]].sel(
-                                time=valid_dt_str, level=var_cfg["level"], method="nearest"
-                            ).squeeze()
-                        elif var_cfg["type"] == "wind_speed":
-                            if "u" not in target_ds or "v" not in target_ds:
-                                logger.warning(f"Target u/v missing for {valid_dt_str}")
-                                continue
-                            tgt_u = target_ds["u"].sel(
-                                time=valid_dt_str, level=var_cfg["level"], method="nearest"
-                            ).squeeze()
-                            tgt_v = target_ds["v"].sel(
-                                time=valid_dt_str, level=var_cfg["level"], method="nearest"
-                            ).squeeze()
-                            tgt_2d = np.sqrt(tgt_u**2 + tgt_v**2)
+                    # 1. Target DataArray
+                    if var_cfg["type"] == "surface":
+                        if var_cfg["target_key"] not in target_ds:
+                            logger.warning(f"Target variable {var_cfg['target_key']} missing for {valid_dt_str}")
+                            continue
+                        tgt_2d = target_ds[var_cfg["target_key"]].sel(time=valid_dt_str)
+                    elif var_cfg["type"] == "atmos":
+                        if var_cfg["target_key"] not in target_ds:
+                            logger.warning(f"Target variable {var_cfg['target_key']} missing for {valid_dt_str}")
+                            continue
+                        tgt_2d = target_ds[var_cfg["target_key"]].sel(
+                            time=valid_dt_str, level=var_cfg["level"], method="nearest"
+                        ).squeeze()
+                    elif var_cfg["type"] == "wind_speed":
+                        if "u" not in target_ds or "v" not in target_ds:
+                            logger.warning(f"Target u/v missing for {valid_dt_str}")
+                            continue
+                        tgt_u = target_ds["u"].sel(
+                            time=valid_dt_str, level=var_cfg["level"], method="nearest"
+                        ).squeeze()
+                        tgt_v = target_ds["v"].sel(
+                            time=valid_dt_str, level=var_cfg["level"], method="nearest"
+                        ).squeeze()
+                        tgt_2d = np.sqrt(tgt_u**2 + tgt_v**2)
 
-                        # 2. Forecast DataArray
-                        if var_cfg["type"] == "surface":
-                            fcst_key = var_cfg["fcst_key"] if var_cfg["fcst_key"] in scope_ds else "2t"
-                            if fcst_key not in scope_ds:
-                                logger.warning(f"Forecast key {fcst_key} missing in {scope_file.name}")
-                                continue
-                            fcst_2d = scope_ds[fcst_key].sel(lead_time=lt_delta).squeeze()
-                        elif var_cfg["type"] == "atmos":
-                            fcst_key = var_cfg["fcst_key"]
-                            if fcst_key not in scope_ds:
-                                logger.warning(f"Forecast key {fcst_key} missing in {scope_file.name}")
-                                continue
-                            fcst_2d = scope_ds[fcst_key].sel(
-                                lead_time=lt_delta, level=var_cfg["level"], method="nearest"
-                            ).squeeze()
-                        elif var_cfg["type"] == "wind_speed":
-                            if "u" not in scope_ds or "v" not in scope_ds:
-                                logger.warning(f"Forecast u/v missing in {scope_file.name}")
-                                continue
-                            fcst_u = scope_ds["u"].sel(
-                                lead_time=lt_delta, level=var_cfg["level"], method="nearest"
-                            ).squeeze()
-                            fcst_v = scope_ds["v"].sel(
-                                lead_time=lt_delta, level=var_cfg["level"], method="nearest"
-                            ).squeeze()
-                            fcst_2d = np.sqrt(fcst_u**2 + fcst_v**2)
+                    # 2. Forecast DataArray
+                    if var_cfg["type"] == "surface":
+                        fcst_key = var_cfg["fcst_key"] if var_cfg["fcst_key"] in scope_ds else "2t"
+                        if fcst_key not in scope_ds:
+                            logger.warning(f"Forecast key {fcst_key} missing in {scope_file.name}")
+                            continue
+                        fcst_2d = scope_ds[fcst_key].sel(lead_time=lt_delta).squeeze()
+                    elif var_cfg["type"] == "atmos":
+                        fcst_key = var_cfg["fcst_key"]
+                        if fcst_key not in scope_ds:
+                            logger.warning(f"Forecast key {fcst_key} missing in {scope_file.name}")
+                            continue
+                        fcst_2d = scope_ds[fcst_key].sel(
+                            lead_time=lt_delta, level=var_cfg["level"], method="nearest"
+                        ).squeeze()
+                    elif var_cfg["type"] == "wind_speed":
+                        if "u" not in scope_ds or "v" not in scope_ds:
+                            logger.warning(f"Forecast u/v missing in {scope_file.name}")
+                            continue
+                        fcst_u = scope_ds["u"].sel(
+                            lead_time=lt_delta, level=var_cfg["level"], method="nearest"
+                        ).squeeze()
+                        fcst_v = scope_ds["v"].sel(
+                            lead_time=lt_delta, level=var_cfg["level"], method="nearest"
+                        ).squeeze()
+                        fcst_2d = np.sqrt(fcst_u**2 + fcst_v**2)
 
-                        # 3. Crop to Original Med Box and compute RMSE
-                        fcst_cropped = fcst_2d.sel(
-                            latitude=slice(ORIGINAL_MED_BBOX["lat_max"], ORIGINAL_MED_BBOX["lat_min"]),
-                            longitude=slice(ORIGINAL_MED_BBOX["lon_min"], ORIGINAL_MED_BBOX["lon_max"])
-                        )
-                        fcst_arr, tgt_arr = align_and_subset_2d(fcst_cropped, tgt_2d)
-                        rmse_val = rmse(fcst_arr, tgt_arr)
+                    # 3. Crop to Original Med Box and compute RMSE
+                    fcst_cropped = fcst_2d.sel(
+                        latitude=slice(ORIGINAL_MED_BBOX["lat_max"], ORIGINAL_MED_BBOX["lat_min"]),
+                        longitude=slice(ORIGINAL_MED_BBOX["lon_min"], ORIGINAL_MED_BBOX["lon_max"])
+                    )
+                    fcst_arr, tgt_arr = align_and_subset_2d(fcst_cropped, tgt_2d)
+                    rmse_val = rmse(fcst_arr, tgt_arr)
 
-                        logger.info(
-                            f"Lead time {lt_h:3d}h | Variable: {var_id:<15} | Model: {scope_name:<15} | RMSE: {rmse_val:.4f} {var_cfg['unit']}"
-                        )
+                    logger.info(
+                        f"Lead time {lt_h:3d}h | Variable: {var_id:<15} | Model: {scope_name:<15} | RMSE: {rmse_val:.4f} {var_cfg['unit']}"
+                    )
 
-                        results.append({
-                            "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                            "valid_time": valid_dt.strftime("%Y-%m-%d %H:%M:%S"),
-                            "lead_time_hours": lt_h,
-                            "variable": var_id,
-                            "metric": "RMSE",
-                            "model": f"Aurora_{scope_name}",
-                            "value": rmse_val
-                        })
-                    except Exception as e:
-                        logger.error(f"Error evaluating {var_id} for {scope_name} at {lt_h}h ({valid_dt_str}): {e}")
-
+                    results.append({
+                        "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "valid_time": valid_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "lead_time_hours": lt_h,
+                        "variable": var_id,
+                        "metric": "RMSE",
+                        "model": f"Aurora_{scope_name}",
+                        "value": rmse_val
+                    })
+                    
             scope_ds.close()
 
     if results:

@@ -20,11 +20,24 @@ class AuroraDataLoader:
     ERA5 weather data into Aurora 1.5-compatible PyTorch Batch objects.
     """
 
-    def __init__(self, cache_dir: Path | str, pretrained_only: bool = False):
+    def __init__(
+        self,
+        cache_dir: Path | str,
+        pretrained_only: bool = False,
+        res: float = 0.25
+    ):
         self.cache_dir = Path(cache_dir).expanduser()
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.res = float(res)
+        if self.res not in (0.25, 0.1):
+            raise ValueError(
+                f"Unsupported resolution: {self.res}. Supported resolutions are 0.25 and 0.1."
+            )
+
         self.pretrained_only = pretrained_only
-        self.nc_suffix = "_pretrained.nc" if pretrained_only else ".nc"
+        if self.res == 0.1:
+            # Aurora 0.1 HRES is pretrained/finetuned only (uses 4 surface vars and 5 atmospheric vars)
+            self.pretrained_only = True
 
         self.levels = [
             50, 100, 150, 200, 250, 300, 400,
@@ -63,49 +76,51 @@ class AuroraDataLoader:
             "t": "t", "u": "u", "v": "v", "q": "q", "z": "z"
         }
 
-        print("Loading Aurora 1.5 static variables...")
-        self.static_path = hf_hub_download(
-            repo_id="microsoft/aurora",
-            filename="aurora-0.25-v1.5-static.pickle",
-        )
+        print(f"Loading Aurora static variables (res={self.res}, pretrained_only={self.pretrained_only})...")
+        if self.res == 0.1:
+            self.static_path = hf_hub_download(
+                repo_id="microsoft/aurora",
+                filename="aurora-0.1-static.pickle",
+            )
+            self.global_lat = np.linspace(90, -90, 1801)
+            self.global_lon = np.linspace(0, 360, 3600, endpoint=False)
+        elif self.pretrained_only:
+            self.static_path = hf_hub_download(
+                repo_id="microsoft/aurora",
+                filename="aurora-0.25-static.pickle",
+            )
+            self.global_lat = np.linspace(90, -90, 721)
+            self.global_lon = np.linspace(0, 359.75, 1440)
+        else:
+            self.static_path = hf_hub_download(
+                repo_id="microsoft/aurora",
+                filename="aurora-0.25-v1.5-static.pickle",
+            )
+            self.global_lat = np.linspace(90, -90, 721)
+            self.global_lon = np.linspace(0, 359.75, 1440)
+
         with open(self.static_path, "rb") as f:
             self.static_raw = pickle.load(f)
-
-        self.global_lat = np.linspace(90, -90, 721)
-        self.global_lon = np.linspace(0, 359.75, 1440)
 
     # ================================================================
     # Cache & Normalization Helpers
     # ================================================================
 
-    def _resolve_cache_path(
-        self, prefix: str, time_label: str, bbox: dict | None = None, bulk: bool = False
-    ) -> Path:
-        """Centralized cache path resolution for both on-demand and bulk data."""
-        if bulk:
-            base = self.cache_dir / "bulk"
-            if bbox is not None:
-                base = base / "regional"
-        else:
-            base = self.cache_dir / "regional" if bbox is not None else self.cache_dir
-        base.mkdir(parents=True, exist_ok=True)
-        return base / f"{prefix}_{time_label}{self.nc_suffix}"
+    def _resolve_cache_path(self, prefix: str, time_label: str) -> Path:
+        """Resolve cache file path directly inside self.cache_dir."""
+        return self.cache_dir / f"{prefix}_{time_label}.nc"
 
-    def _bulk_cache_dir(self, bbox: dict | None = None) -> Path:
-        """Base cache directory for bulk monthly downloads."""
-        if bbox is not None:
-            bulk_dir = self.cache_dir / "bulk" / "regional"
-        else:
-            bulk_dir = self.cache_dir / "bulk"
-        bulk_dir.mkdir(parents=True, exist_ok=True)
-        return bulk_dir
 
     @staticmethod
     def _normalize_era5(ds: xr.Dataset) -> xr.Dataset:
         """Standardize ERA5 coordinates (valid_time -> time, pressure_level -> level)."""
-        if "valid_time" in ds.coords or "valid_time" in ds.dims:
+        if ("valid_time" in ds.coords or "valid_time" in ds.dims) and "time" not in ds.dims:
+            if "time" in ds.coords:
+                ds = ds.drop_vars("time")
             ds = ds.rename({"valid_time": "time"})
-        if "pressure_level" in ds.coords or "pressure_level" in ds.dims:
+        if ("pressure_level" in ds.coords or "pressure_level" in ds.dims) and "level" not in ds.dims:
+            if "level" in ds.coords:
+                ds = ds.drop_vars("level")
             ds = ds.rename({"pressure_level": "level"})
         return ds
 
@@ -126,7 +141,8 @@ class AuroraDataLoader:
     # ================================================================
     # Data Access (Public & Internal)
     # ================================================================
-
+    
+    ############## REFACTOR FROM HERE ################
     def _download_from_cds(
         self, required_dts: list[datetime], bbox: dict | None = None
     ) -> xr.Dataset:
@@ -161,8 +177,8 @@ class AuroraDataLoader:
             surf_req["area"] = area
             atmos_req["area"] = area
 
-        surf_path = self._resolve_cache_path("era5_surf", time_label, bbox=bbox, bulk=False)
-        atmos_path = self._resolve_cache_path("era5_atmos", time_label, bbox=bbox, bulk=False)
+        surf_path = self._resolve_cache_path("era5_surf", time_label)
+        atmos_path = self._resolve_cache_path("era5_atmos", time_label)
 
         if not surf_path.exists():
             print(f"Downloading Surface variables for {start_str} to {end_str}...")
@@ -172,16 +188,22 @@ class AuroraDataLoader:
             print(f"Downloading Atmospheric variables for {start_str} to {end_str}...")
             c.retrieve("reanalysis-era5-pressure-levels", atmos_req, str(atmos_path))
 
-        ds_surf = xr.open_dataset(surf_path, engine="netcdf4").load()
-        ds_atmos = xr.open_dataset(atmos_path, engine="netcdf4").load()
-        ds = xr.merge([ds_surf, ds_atmos], compat="override")
-        ds = self._normalize_era5(ds)
+        exact_times = sorted(list(set(dt.strftime("%Y-%m-%dT%H:00:00") for dt in required_dts)))
+        with xr.open_dataset(surf_path, engine="netcdf4") as ds_surf_raw, \
+             xr.open_dataset(atmos_path, engine="netcdf4") as ds_atmos_raw:
+            ds_surf = self._normalize_era5(ds_surf_raw)
+            ds_atmos = self._normalize_era5(ds_atmos_raw)
 
-        exact_times = [dt.strftime("%Y-%m-%dT%H:00:00") for dt in required_dts]
-        ds = ds.sel(time=exact_times)
+            ds_surf_sub = ds_surf.sel(time=exact_times)
+            ds_atmos_sub = ds_atmos.sel(time=exact_times)
 
-        if bbox is not None:
-            ds = self._apply_bbox(ds, bbox)
+            if bbox is not None:
+                ds_surf_sub = self._apply_bbox(ds_surf_sub, bbox)
+                ds_atmos_sub = self._apply_bbox(ds_atmos_sub, bbox)
+
+            ds_surf_sub = ds_surf_sub.load()
+            ds_atmos_sub = ds_atmos_sub.load()
+            ds = xr.merge([ds_surf_sub, ds_atmos_sub], compat="override")
 
         return ds
 
@@ -197,34 +219,43 @@ class AuroraDataLoader:
         # Check if all files exist before loading anything
         for year, month in required_months:
             time_label = f"{year}_{month:02d}"
-            surf_path = self._resolve_cache_path("era5_surf", time_label, bbox=bbox, bulk=True)
-            atmos_path = self._resolve_cache_path("era5_atmos", time_label, bbox=bbox, bulk=True)
+            surf_path = self._resolve_cache_path("era5_surf", time_label)
+            atmos_path = self._resolve_cache_path("era5_atmos", time_label)
             if not surf_path.exists() or not atmos_path.exists():
                 return None
 
-        # All files exist: open, merge, and slice
+        # All files exist: open, slice by time & bbox per month, and merge
         datasets = []
         for year, month in required_months:
             time_label = f"{year}_{month:02d}"
-            surf_path = self._resolve_cache_path("era5_surf", time_label, bbox=bbox, bulk=True)
-            atmos_path = self._resolve_cache_path("era5_atmos", time_label, bbox=bbox, bulk=True)
+            surf_path = self._resolve_cache_path("era5_surf", time_label)
+            atmos_path = self._resolve_cache_path("era5_atmos", time_label)
 
-            ds_surf = xr.open_dataset(surf_path, engine="netcdf4")
-            ds_atmos = xr.open_dataset(atmos_path, engine="netcdf4")
-            ds_month = xr.merge([ds_surf, ds_atmos], compat="override")
-            ds_month = self._normalize_era5(ds_month)
-            datasets.append(ds_month)
+            month_dts = sorted(list(set(dt for dt in required_dts if (dt.year, dt.month) == (year, month))))
+            month_time_strs = [dt.strftime("%Y-%m-%dT%H:00:00") for dt in month_dts]
+
+            with xr.open_dataset(surf_path, engine="netcdf4") as ds_surf_raw, \
+                 xr.open_dataset(atmos_path, engine="netcdf4") as ds_atmos_raw:
+
+                ds_surf = self._normalize_era5(ds_surf_raw)
+                ds_atmos = self._normalize_era5(ds_atmos_raw)
+
+                ds_surf_sub = ds_surf.sel(time=month_time_strs)
+                ds_atmos_sub = ds_atmos.sel(time=month_time_strs)
+
+                if bbox is not None:
+                    ds_surf_sub = self._apply_bbox(ds_surf_sub, bbox)
+                    ds_atmos_sub = self._apply_bbox(ds_atmos_sub, bbox)
+
+                ds_surf_sub = ds_surf_sub.load()
+                ds_atmos_sub = ds_atmos_sub.load()
+                ds_month = xr.merge([ds_surf_sub, ds_atmos_sub], compat="override")
+                datasets.append(ds_month)
 
         if len(datasets) == 1:
             ds = datasets[0]
         else:
             ds = xr.concat(datasets, dim="time")
-
-        exact_times = [dt.strftime("%Y-%m-%dT%H:00:00") for dt in required_dts]
-        ds = ds.sel(time=exact_times).load()
-
-        if bbox is not None:
-            ds = self._apply_bbox(ds, bbox)
 
         return ds
 
@@ -263,19 +294,24 @@ class AuroraDataLoader:
         def build_tensors(sub_ds, time_list):
             surf = {}
             for nc_name, aurora_name in self.surf_name_map.items():
+                if nc_name not in sub_ds:
+                    continue
                 data = sub_ds[nc_name].values
                 surf[aurora_name] = torch.from_numpy(
                     np.nan_to_num(data, nan=0.0).astype(np.float32)
                 )
 
-            sol = np.stack(
-                [insolation([t], lat, lon, enforce_2d=True)[0] for t in time_list],
-                axis=0,
-            )
-            surf["insolation"] = torch.from_numpy(sol.astype(np.float32))
+            if not self.pretrained_only:
+                sol = np.stack(
+                    [insolation([t], lat, lon, enforce_2d=True)[0] for t in time_list],
+                    axis=0,
+                )
+                surf["insolation"] = torch.from_numpy(sol.astype(np.float32))
 
             atmos = {}
             for nc_name, aurora_name in self.atmos_name_map.items():
+                if nc_name not in sub_ds:
+                    continue
                 arr = sub_ds[nc_name].transpose("time", "level", "latitude", "longitude").values
                 atmos[aurora_name] = torch.from_numpy(
                     np.nan_to_num(arr, nan=0.0).astype(np.float32)
@@ -290,26 +326,9 @@ class AuroraDataLoader:
             target_surf, target_atmos = {}, {}
 
         # Static Variables
-        static_inputs = {}
-        if bbox is not None:
-            lat_indices = [
-                int(np.argmin(np.abs(self.global_lat - l))) for l in ds.latitude.values
-            ]
-            lon_indices = [
-                int(np.argmin(np.abs(self.global_lon - (l % 360)))) for l in ds.longitude.values
-            ]
-
-            for k, v in self.static_raw.items():
-                tensor_v = torch.from_numpy(v).float()
-                if tensor_v.shape[-2:] == (721, 1440):
-                    tensor_v = tensor_v[..., lat_indices, :][..., :, lon_indices]
-                static_inputs[k] = tensor_v
-        else:
-            for k, v in self.static_raw.items():
-                static_inputs[k] = torch.from_numpy(v).float()
-
-        lon_vals = ds.longitude.values.astype(np.float64)
-        lon_vals = np.where(lon_vals < 0, lon_vals + 360, lon_vals)
+        lon_vals = ds.longitude.values.astype(np.float64).copy()
+        if (lon_vals < 0).any() and not (np.diff(lon_vals) > 0).all():
+            lon_vals = np.where(lon_vals < 0, lon_vals + 360, lon_vals)
 
         lat_tensor = torch.from_numpy(ds.latitude.values.copy())
         lon_tensor = torch.from_numpy(lon_vals)
@@ -329,23 +348,109 @@ class AuroraDataLoader:
         target_surf = {k: v.unsqueeze(0) for k, v in target_surf.items()}
         target_atmos = {k: v.unsqueeze(0) for k, v in target_atmos.items()}
 
-        input_batch = Batch(
-            surf_vars=input_surf,
-            atmos_vars=input_atmos,
-            static_vars=static_inputs,
-            metadata=input_metadata,
-        )
-        if target_dts:
-            target_batch = Batch(
-                surf_vars=target_surf,
-                atmos_vars=target_atmos,
-                static_vars=static_inputs,
-                metadata=target_metadata,
-            )
-        else:
-            target_batch = None
+        if self.res == 0.1:
+            # Per Microsoft Aurora 0.1 documentation:
+            # Regrid first with empty static_vars, then attach native 0.1 static variables.
+            input_batch = Batch(
+                surf_vars=input_surf,
+                atmos_vars=input_atmos,
+                static_vars={},
+                metadata=input_metadata,
+            ).regrid(res=0.1)
 
-        return input_batch, target_batch
+            if target_dts:
+                target_batch = Batch(
+                    surf_vars=target_surf,
+                    atmos_vars=target_atmos,
+                    static_vars={},
+                    metadata=target_metadata,
+                ).regrid(res=0.1)
+            else:
+                target_batch = None
+
+            if bbox is not None:
+                # Regrid produces a global grid; slice back to the requested bbox
+                lat_arr = input_batch.metadata.lat.numpy()
+                lon_arr = input_batch.metadata.lon.numpy()
+
+                lat_indices = np.where((lat_arr <= bbox["lat_max"]) & (lat_arr >= bbox["lat_min"]))[0]
+                if bbox["lon_min"] > bbox["lon_max"]:
+                    lon_indices = np.where((lon_arr >= bbox["lon_min"]) | (lon_arr <= bbox["lon_max"]))[0]
+                else:
+                    lon_indices = np.where((lon_arr >= bbox["lon_min"]) & (lon_arr <= bbox["lon_max"]))[0]
+
+                static_inputs = {}
+                for k, v in self.static_raw.items():
+                    tensor_v = torch.from_numpy(v).float()
+                    if tensor_v.ndim >= 2:
+                        tensor_v = tensor_v[..., lat_indices, :][..., :, lon_indices]
+                    static_inputs[k] = tensor_v
+
+                def _slice_batch(b: Batch) -> Batch:
+                    new_surf = {k: v[..., lat_indices, :][..., :, lon_indices] for k, v in b.surf_vars.items()}
+                    new_atmos = {k: v[..., lat_indices, :][..., :, lon_indices] for k, v in b.atmos_vars.items()}
+                    new_lat = b.metadata.lat[lat_indices]
+                    new_lon = b.metadata.lon[lon_indices]
+                    return Batch(
+                        surf_vars=new_surf,
+                        atmos_vars=new_atmos,
+                        static_vars=static_inputs,
+                        metadata=Metadata(
+                            lat=new_lat,
+                            lon=new_lon,
+                            atmos_levels=b.metadata.atmos_levels,
+                            time=b.metadata.time,
+                        ),
+                    )
+
+                input_batch = _slice_batch(input_batch)
+                if target_batch is not None:
+                    target_batch = _slice_batch(target_batch)
+            else:
+                static_inputs = {k: torch.from_numpy(v).float() for k, v in self.static_raw.items()}
+                input_batch.static_vars = static_inputs
+                if target_batch is not None:
+                    target_batch.static_vars = static_inputs
+
+            return input_batch, target_batch
+
+        else:
+            # 0.25 Degree Path (Standard)
+            static_inputs = {}
+            if bbox is not None:
+                lat_indices = [
+                    int(np.argmin(np.abs(self.global_lat - l))) for l in ds.latitude.values
+                ]
+                lon_indices = [
+                    int(np.argmin(np.abs(self.global_lon - (l % 360)))) for l in ds.longitude.values
+                ]
+
+                for k, v in self.static_raw.items():
+                    tensor_v = torch.from_numpy(v).float()
+                    if tensor_v.ndim >= 2:
+                        tensor_v = tensor_v[..., lat_indices, :][..., :, lon_indices]
+                    static_inputs[k] = tensor_v
+            else:
+                for k, v in self.static_raw.items():
+                    static_inputs[k] = torch.from_numpy(v).float()
+
+            input_batch = Batch(
+                surf_vars=input_surf,
+                atmos_vars=input_atmos,
+                static_vars=static_inputs,
+                metadata=input_metadata,
+            )
+            if target_dts:
+                target_batch = Batch(
+                    surf_vars=target_surf,
+                    atmos_vars=target_atmos,
+                    static_vars=static_inputs,
+                    metadata=target_metadata,
+                )
+            else:
+                target_batch = None
+
+            return input_batch, target_batch
 
     def get_batch(
         self,
@@ -389,8 +494,8 @@ class AuroraDataLoader:
         days_in_month = calendar.monthrange(year, month)[1]
 
         time_label = f"{year}_{month:02d}"
-        surf_path = self._resolve_cache_path("era5_surf", time_label, bbox=bbox, bulk=True)
-        atmos_path = self._resolve_cache_path("era5_atmos", time_label, bbox=bbox, bulk=True)
+        surf_path = self._resolve_cache_path("era5_surf", time_label)
+        atmos_path = self._resolve_cache_path("era5_atmos", time_label)
 
         if surf_path.exists() and atmos_path.exists():
             print(f"  Bulk cache hit: {year}-{month:02d}")

@@ -30,6 +30,9 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
+# Prevent CUDA caching allocator fragmentation (15+ GiB reserved-but-unallocated on L40S)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import pandas as pd
 import psutil
@@ -357,6 +360,7 @@ def predict_regional_rollout_with_bc(
         pred_01 = bc_applicator.apply_boundary(pred_01, global_025_batches[step_idx])
         predictions.append(pred_01.to("cpu"))
         current_batch = _advance_history_window(current_batch, pred_01)
+        del pred_01
 
     return predictions
 
@@ -420,6 +424,11 @@ def generate_forecasts(
 
     logger.info("Loading Aurora 0.1° HighRes model...")
     model_01 = AuroraHighRes(autocast=True)
+    # Aurora.__init__ only sets autocast_backbone=True by default (unlike AuroraV1p5).
+    # Enabling autocast on the Perceiver encoder & decoder halves the 6.43 GiB decoder
+    # activations to 3.21 GiB (bfloat16) while unnormalisation still runs in float32.
+    model_01.autocast_encoder = True
+    model_01.autocast_decoder = True
     model_01.load_checkpoint("microsoft/aurora", "aurora-0.1-finetuned.ckpt")
 
     logger.info("Loading Aurora 0.25° V1.5 model...")

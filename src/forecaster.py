@@ -52,7 +52,9 @@ class AuroraForecaster:
             # Default to Aurora 1.5's behavior if not provided and supported
             kwargs["fine_lead_times"] = [6.0]
 
-        current_batch = initial_batch.to(self.device)
+        # Keep initial_batch on CPU here; aurora.rollout() crops and moves it to self.device,
+        # which allows step 1's GPU input batch to be freed as soon as step 2 advances.
+        current_batch = initial_batch
         num_sub_steps = len(kwargs.get("fine_lead_times", [6.0]))
         total_preds = steps * num_sub_steps
         

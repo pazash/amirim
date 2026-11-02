@@ -1,18 +1,19 @@
 """
-Compare Aurora 0.1° Global vs. Aurora 0.1° Regional with 0.25° Global Boundary Conditions.
+Compare Aurora 0.1° Global vs. Aurora 0.1° Regional (with and without 0.25° Global Boundary Conditions).
 
 Workflow:
   1. Uses the evaluation process, 10 seasonal dates, 4 lead times (6h, 24h, 72h, 120h),
      and evaluation variables from `compare_global_vs_med_aurora.py`.
-  2. For each date, computes:
+  2. For each date, computes and evaluates RMSE on `ORIGINAL_MED_BBOX` for 3 models:
        • Global_0.1: Aurora 0.1° (AuroraHighRes) rolled out globally via `AuroraForecaster.predict_rollout`.
        • Regional_0.1_BC: Aurora 0.25° (AuroraV1p5) rolled out globally via `AuroraForecaster.predict_rollout`
-         + Aurora 0.1° (AuroraHighRes) stepped regionally on `ORIGINAL_MED_BBOX` + ~1° padding
+         + Aurora 0.1° (AuroraHighRes) stepped regionally on `REGIONAL_PADDED_BBOX`
          via `AuroraForecaster.predict_step`, overriding the ~1° boundary after each step.
-  3. Measures and saves the 4 requested resource metrics on the finished rollout:
+       • Regional_0.1: Aurora 0.1° (AuroraHighRes) rolled out regionally on `REGIONAL_PADDED_BBOX`
+         without boundary conditions via `AuroraForecaster.predict_rollout`.
+  3. Measures and saves the resource metrics on the finished rollout for all 3 models:
        • time_sec (wall-clock time)
        • ram_usage_MiB (CPU RAM usage)
-       • gpu_usage_pct (GPU utilization %)
        • gpu_memory_MiB (peak GPU memory allocated)
 """
 
@@ -24,7 +25,6 @@ import gc
 import logging
 import os
 import re
-import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
@@ -87,7 +87,7 @@ REGIONAL_PADDED_BBOX = {
     "lat_min": 24.25,
 }
 
-MODEL_SCOPES = ("Global_0.1", "Regional_0.1_BC")
+MODEL_SCOPES = ("Global_0.1", "Regional_0.1_BC", "Regional_0.1")
 
 # 10 diverse dates across seasons from compare_global_vs_med_aurora.py
 SELECTED_DATES = [
@@ -187,7 +187,7 @@ EVAL_VARIABLES = [
 
 
 # ---------------------------------------------------------------------------
-# Resource Monitoring Helpers (Time, RAM, GPU %, GPU Memory)
+# Resource Monitoring Helpers (Time, RAM, GPU Memory)
 # ---------------------------------------------------------------------------
 def _get_ram_mb() -> float:
     """Return current process RAM usage (RSS) in MiB."""
@@ -199,22 +199,6 @@ def _get_gpu_peak_mem_mb() -> float:
     if not torch.cuda.is_available():
         return 0.0
     return torch.cuda.max_memory_allocated() / (1024 ** 2)
-
-
-def _get_gpu_util_pct() -> float | None:
-    """Query nvidia-smi for GPU utilization %."""
-    try:
-        out = subprocess.check_output(
-            [
-                "nvidia-smi",
-                "--query-gpu=utilization.gpu",
-                "--format=csv,noheader,nounits",
-            ],
-            timeout=5,
-        )
-        return float(out.decode().strip().split(",")[0])
-    except Exception:
-        return None
 
 
 def _clear_caches():
@@ -269,10 +253,18 @@ class RegionalBoundaryApplicator:
         j0 = j1 - 1
         wx_np = (lon_01_np - lon_025_np[j0]) / (lon_025_np[j1] - lon_025_np[j0])
 
-        self.i0 = torch.from_numpy(i0).long().to(device)
-        self.i1 = torch.from_numpy(i1).long().to(device)
-        self.j0 = torch.from_numpy(j0).long().to(device)
-        self.j1 = torch.from_numpy(j1).long().to(device)
+        # Slice the 0.25° global tensor on CPU to only the needed regional range before moving to GPU
+        i_min = int(min(i0.min(), i1.min()))
+        i_max = int(max(i0.max(), i1.max())) + 1
+        j_min = int(min(j0.min(), j1.min()))
+        j_max = int(max(j0.max(), j1.max())) + 1
+        self.lat_slice_025 = slice(i_min, i_max)
+        self.lon_slice_025 = slice(j_min, j_max)
+
+        self.i0 = torch.from_numpy(i0 - i_min).long().to(device)
+        self.i1 = torch.from_numpy(i1 - i_min).long().to(device)
+        self.j0 = torch.from_numpy(j0 - j_min).long().to(device)
+        self.j1 = torch.from_numpy(j1 - j_min).long().to(device)
 
         self.wy = torch.from_numpy(wy_np.astype(np.float32)).to(device).view(-1, 1)
         self.wx = torch.from_numpy(wx_np.astype(np.float32)).to(device).view(1, -1)
@@ -289,11 +281,14 @@ class RegionalBoundaryApplicator:
             device=device, dtype=torch.bool
         )
 
-    def _interp(self, tensor_025: torch.Tensor) -> torch.Tensor:
-        """Bilinearly interpolate a global 0.25° tensor onto the regional 0.1° grid."""
-        wy = self.wy.to(dtype=tensor_025.dtype)
-        wx = self.wx.to(dtype=tensor_025.dtype)
-        v_lat = (1.0 - wy) * tensor_025[..., self.i0, :] + wy * tensor_025[..., self.i1, :]
+    def _interp(self, tensor_025_sub: torch.Tensor) -> torch.Tensor:
+        """Bilinearly interpolate a regional-sliced 0.25° tensor onto the regional 0.1° grid."""
+        wy = self.wy.to(dtype=tensor_025_sub.dtype)
+        wx = self.wx.to(dtype=tensor_025_sub.dtype)
+        v_lat = (
+            (1.0 - wy) * tensor_025_sub[..., self.i0, :]
+            + wy * tensor_025_sub[..., self.i1, :]
+        )
         return (1.0 - wx) * v_lat[..., :, self.j0] + wx * v_lat[..., :, self.j1]
 
     def apply_boundary(self, pred_01: Batch, pred_025: Batch) -> Batch:
@@ -303,13 +298,17 @@ class RegionalBoundaryApplicator:
         """
         new_surf = {}
         for k, v_01 in pred_01.surf_vars.items():
-            v_025 = pred_025.surf_vars[k].to(device=v_01.device, dtype=v_01.dtype)
+            v_025 = pred_025.surf_vars[k][
+                ..., self.lat_slice_025, self.lon_slice_025
+            ].to(device=v_01.device, dtype=v_01.dtype)
             v_025_interp = self._interp(v_025)
             new_surf[k] = torch.where(self.boundary_mask_2d, v_025_interp, v_01)
 
         new_atmos = {}
         for k, v_01 in pred_01.atmos_vars.items():
-            v_025 = pred_025.atmos_vars[k].to(device=v_01.device, dtype=v_01.dtype)
+            v_025 = pred_025.atmos_vars[k][
+                ..., self.lat_slice_025, self.lon_slice_025
+            ].to(device=v_01.device, dtype=v_01.dtype)
             v_025_interp = self._interp(v_025)
             new_atmos[k] = torch.where(self.boundary_mask_2d, v_025_interp, v_01)
 
@@ -408,10 +407,11 @@ def generate_forecasts(
     resource_csv: str = "benchmark_01_global_vs_regional_bc.csv",
 ) -> None:
     """
-    Runs Aurora predictions for each date and lead time for:
-      1. Global_0.1 (Aurora 0.1° globally)
+    Runs Aurora predictions for each date and lead time for the 3 models:
+      1. Global_0.1 (Aurora 0.1° globally via predict_rollout)
       2. Regional_0.1_BC (Aurora 0.25° globally + Aurora 0.1° regionally with BC)
-    Saves NetCDF forecasts and records time, RAM usage, GPU usage %, and GPU memory usage.
+      3. Regional_0.1 (Aurora 0.1° regionally without BC via predict_rollout)
+    Saves NetCDF forecasts and records time, RAM usage, and GPU memory usage for each model.
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -472,7 +472,6 @@ def generate_forecasts(
 
                     ram_mb = _get_ram_mb()
                     gpu_mem_mb = _get_gpu_peak_mem_mb()
-                    gpu_util = _get_gpu_util_pct()
 
                     resource_rows.append({
                         "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -480,12 +479,11 @@ def generate_forecasts(
                         "model": "Global_0.1",
                         "time_sec": round(elapsed_sec, 2),
                         "ram_usage_MiB": round(ram_mb, 1),
-                        "gpu_usage_pct": gpu_util,
                         "gpu_memory_MiB": round(gpu_mem_mb, 1),
                     })
                     logger.info(
                         f"  [Global_0.1 | {lt_h}h] Time: {elapsed_sec:.2f}s | "
-                        f"RAM: {ram_mb:.1f} MiB | GPU Util: {gpu_util}% | GPU Mem: {gpu_mem_mb:.1f} MiB"
+                        f"RAM: {ram_mb:.1f} MiB | GPU Mem: {gpu_mem_mb:.1f} MiB"
                     )
 
                     if lt_h == max(LEAD_TIMES_H):
@@ -502,16 +500,15 @@ def generate_forecasts(
 
         _clear_caches()
 
-        # ==================================================================
-        # 2. Global 0.25° + Regional 0.1° with Boundary Conditions
-        # ==================================================================
-        out_file_r01 = out_dir / f"aurora_Regional_0.1_BC_{init_str}.nc"
-        if not _is_forecast_file_valid(out_file_r01):
-            logger.info("Running Regional_0.1_BC (0.25° Global + 0.1° Regional with BC)...")
+        # Shared regional 0.1° input batch for Regional_0.1_BC and Regional_0.1
+        out_file_r01_bc = out_dir / f"aurora_Regional_0.1_BC_{init_str}.nc"
+        out_file_r01 = out_dir / f"aurora_Regional_0.1_{init_str}.nc"
+        need_r01_bc = not _is_forecast_file_valid(out_file_r01_bc)
+        need_r01 = not _is_forecast_file_valid(out_file_r01)
+
+        input_batch_01_regional = None
+        if need_r01_bc or need_r01:
             try:
-                input_batch_025_global, _ = loader_025_global.get_batch(
-                    init_dt, history_steps=1, forecast_steps=0, bbox=None
-                )
                 input_batch_01_regional, _ = loader_01_regional.get_batch(
                     init_dt,
                     history_steps=1,
@@ -519,6 +516,18 @@ def generate_forecasts(
                     bbox=REGIONAL_PADDED_BBOX,
                 )
                 input_batch_01_regional = filter_batch_for_pretrained(input_batch_01_regional)
+            except Exception as e:
+                logger.error(f"Failed to load regional 0.1° input batch for {init_dt}: {e}", exc_info=True)
+
+        # ==================================================================
+        # 2. Global 0.25° + Regional 0.1° with Boundary Conditions
+        # ==================================================================
+        if need_r01_bc and input_batch_01_regional is not None:
+            logger.info("Running Regional_0.1_BC (0.25° Global + 0.1° Regional with BC)...")
+            try:
+                input_batch_025_global, _ = loader_025_global.get_batch(
+                    init_dt, history_steps=1, forecast_steps=0, bbox=None
+                )
 
                 for lt_h in LEAD_TIMES_H:
                     steps = int(lt_h / 6)
@@ -539,7 +548,6 @@ def generate_forecasts(
                     time_025 = time.perf_counter() - t_start_025
                     ram_025 = _get_ram_mb()
                     gpu_mem_025 = _get_gpu_peak_mem_mb()
-                    gpu_util_025 = _get_gpu_util_pct()
 
                     # Step B: Roll out 0.1° Regional with BC from 0.25° Global
                     model_025.to("cpu")
@@ -558,13 +566,10 @@ def generate_forecasts(
                     time_01 = time.perf_counter() - t_start_01
                     ram_01 = _get_ram_mb()
                     gpu_mem_01 = _get_gpu_peak_mem_mb()
-                    gpu_util_01 = _get_gpu_util_pct()
 
                     total_time_sec = time_025 + time_01
                     peak_ram_mb = max(ram_025, ram_01)
                     peak_gpu_mem_mb = max(gpu_mem_025, gpu_mem_01)
-                    gpu_utils = [u for u in (gpu_util_025, gpu_util_01) if u is not None]
-                    avg_gpu_util = round(float(np.mean(gpu_utils)), 1) if gpu_utils else None
 
                     resource_rows.append({
                         "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
@@ -572,27 +577,76 @@ def generate_forecasts(
                         "model": "Regional_0.1_BC",
                         "time_sec": round(total_time_sec, 2),
                         "ram_usage_MiB": round(peak_ram_mb, 1),
-                        "gpu_usage_pct": avg_gpu_util,
                         "gpu_memory_MiB": round(peak_gpu_mem_mb, 1),
                     })
                     logger.info(
                         f"  [Regional_0.1_BC | {lt_h}h] Time: {total_time_sec:.2f}s | "
-                        f"RAM: {peak_ram_mb:.1f} MiB | GPU Util: {avg_gpu_util}% | "
-                        f"GPU Mem: {peak_gpu_mem_mb:.1f} MiB"
+                        f"RAM: {peak_ram_mb:.1f} MiB | GPU Mem: {peak_gpu_mem_mb:.1f} MiB"
                     )
 
                     if lt_h == max(LEAD_TIMES_H):
-                        _save_forecast_netcdf(regional_01_batches, init_dt, LEAD_TIMES_H, out_file_r01)
+                        _save_forecast_netcdf(regional_01_batches, init_dt, LEAD_TIMES_H, out_file_r01_bc)
 
                     del global_025_batches, regional_01_batches
                     _clear_caches()
 
-                del input_batch_025_global, input_batch_01_regional
+                del input_batch_025_global
             except Exception as e:
                 logger.error(f"Regional_0.1_BC run failed for {init_dt}: {e}", exc_info=True)
-        else:
+        elif not need_r01_bc:
             logger.info(f"Regional_0.1_BC forecast for {init_dt} already exists.")
 
+        _clear_caches()
+
+        # ==================================================================
+        # 3. Regional 0.1° Only (without Boundary Conditions)
+        # ==================================================================
+        if need_r01 and input_batch_01_regional is not None:
+            logger.info("Running Regional_0.1 (0.1° Regional only, without BC)...")
+            try:
+                model_025.to("cpu")
+                forecaster_01 = AuroraForecaster(model=model_01, device=device)
+
+                for lt_h in LEAD_TIMES_H:
+                    steps = int(lt_h / 6)
+                    _clear_caches()
+
+                    t_start = time.perf_counter()
+                    forecast_batches = forecaster_01.predict_rollout(
+                        initial_batch=input_batch_01_regional,
+                        steps=steps,
+                    )
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    elapsed_sec = time.perf_counter() - t_start
+
+                    ram_mb = _get_ram_mb()
+                    gpu_mem_mb = _get_gpu_peak_mem_mb()
+
+                    resource_rows.append({
+                        "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "lead_time_hours": lt_h,
+                        "model": "Regional_0.1",
+                        "time_sec": round(elapsed_sec, 2),
+                        "ram_usage_MiB": round(ram_mb, 1),
+                        "gpu_memory_MiB": round(gpu_mem_mb, 1),
+                    })
+                    logger.info(
+                        f"  [Regional_0.1 | {lt_h}h] Time: {elapsed_sec:.2f}s | "
+                        f"RAM: {ram_mb:.1f} MiB | GPU Mem: {gpu_mem_mb:.1f} MiB"
+                    )
+
+                    if lt_h == max(LEAD_TIMES_H):
+                        _save_forecast_netcdf(forecast_batches, init_dt, LEAD_TIMES_H, out_file_r01)
+
+                    del forecast_batches
+                    _clear_caches()
+            except Exception as e:
+                logger.error(f"Regional_0.1 run failed for {init_dt}: {e}", exc_info=True)
+        elif not need_r01:
+            logger.info(f"Regional_0.1 forecast for {init_dt} already exists.")
+
+        del input_batch_01_regional
         _clear_caches()
 
         if resource_rows:

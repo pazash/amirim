@@ -89,6 +89,65 @@ def extreme_area_ratio(
 # ============================================================
 
 AR_IVT_LEVELS = (300, 400, 500, 600, 700, 850, 925, 1000)
+TCWV_LEVELS = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
+
+
+def compute_tcwv_from_dataset(
+    ds: xr.Dataset,
+    q_var: str = "specific_humidity",
+    levels: Sequence[int] | None = TCWV_LEVELS,
+) -> xr.DataArray:
+    """
+    Compute Total Column Water Vapor (TCWV / Precipitable Water) in kg/m^2 (mm)
+    using vertical trapezoidal integration of specific humidity over pressure levels:
+        TCWV = (1 / g0) * integral(q dp)
+    """
+    from extremeweatherbench import calc
+
+    if levels is not None and "level" in ds.dims:
+        avail_levels = [lvl for lvl in levels if lvl in ds.level.values]
+        ds = ds.sel(level=avail_levels)
+    if "level" in ds.dims:
+        ds = ds.sortby("level")
+
+    tcwv = calc.nantrapezoid_pressure_levels(da=ds[q_var]) / calc.g0
+    tcwv = np.abs(tcwv)
+    tcwv.name = "total_column_water_vapour"
+    return tcwv
+
+
+def aurora_batch_to_tcwv_xarray(
+    predicted_batch,
+    init_time,
+    lead_time_hours: int,
+    levels: Sequence[int] = TCWV_LEVELS,
+) -> xr.Dataset:
+    """
+    Compute 2D Total Column Water Vapor (TCWV) from a single Aurora Batch prediction
+    by integrating specific humidity over the 13 standard pressure levels (50-1000 hPa),
+    returning an xarray Dataset with dims [init_time, lead_time, latitude, longitude].
+    """
+    atmos_ds = aurora_batch_to_xarray(
+        predicted_batch,
+        init_time=init_time,
+        lead_time_hours=lead_time_hours,
+        include_atmos=True,
+        atmos_levels=list(levels),
+        atmos_vars=["q"],
+    )
+    tcwv_da = compute_tcwv_from_dataset(
+        atmos_ds, q_var="q", levels=levels
+    ).compute()
+
+    return xr.Dataset(
+        data_vars={"total_column_water_vapour": tcwv_da},
+        coords={
+            "init_time": atmos_ds.coords["init_time"],
+            "lead_time": atmos_ds.coords["lead_time"],
+            "latitude": atmos_ds.coords["latitude"],
+            "longitude": atmos_ds.coords["longitude"],
+        },
+    )
 
 
 def compute_ivt_from_dataset(
@@ -267,6 +326,10 @@ def load_era5_zarr(variable: str = "temperature") -> xr.Dataset:
     """
     Connect to ARCO ERA5 zarr store (lazy, anonymous).
 
+    Uses ``chunks=None`` (matching ``extremeweatherbench.inputs.ERA5``) so
+    xarray does not construct multi-million-task Dask graphs for all ~273
+    variables in the 1-hourly Zarr store upon opening.
+
     Args:
         variable: ``"temperature"`` returns ``surface_air_temperature``
                   (renamed from ``2m_temperature``).
@@ -274,12 +337,17 @@ def load_era5_zarr(variable: str = "temperature") -> xr.Dataset:
                   ``"atmospheric_river"`` or ``"ivt"`` returns
                   ``eastward_wind``, ``northward_wind``, ``specific_humidity``
                   on the common AR pressure levels.
+                  ``"tcwv"`` or ``"total_column_water_vapour"`` returns
+                  ``specific_humidity`` on the 13 common TCWV pressure levels.
+                  ``"precip_and_tcwv"`` returns both ``total_precipitation``
+                  and ``specific_humidity`` on the 13 TCWV pressure levels.
     """
     _ensure_gcs_anon()
     logger.info("Connecting to ARCO ERA5 zarr store...")
     ds = xr.open_zarr(
         "gs://gcp-public-data-arco-era5/ar/full_37-1h-0p25deg-chunk-1.zarr-v3",
         storage_options={"token": "anon"},
+        chunks=None,
     )
     if variable == "temperature":
         ds = ds.rename({"2m_temperature": "surface_air_temperature"})
@@ -296,9 +364,18 @@ def load_era5_zarr(variable: str = "temperature") -> xr.Dataset:
         ds = ds[["eastward_wind", "northward_wind", "specific_humidity"]]
         avail_levels = [lvl for lvl in AR_IVT_LEVELS if lvl in ds.level.values]
         return ds.sel(level=avail_levels)
+    elif variable in ("tcwv", "total_column_water_vapour"):
+        ds = ds[["specific_humidity"]]
+        avail_levels = [lvl for lvl in TCWV_LEVELS if lvl in ds.level.values]
+        return ds.sel(level=avail_levels)
+    elif variable == "precip_and_tcwv":
+        ds = ds[["total_precipitation", "specific_humidity"]]
+        avail_levels = [lvl for lvl in TCWV_LEVELS if lvl in ds.level.values]
+        return ds.sel(level=avail_levels)
     else:
         raise ValueError(
-            f"Unknown variable: {variable!r}. Use 'temperature', 'precipitation', or 'atmospheric_river'."
+            f"Unknown variable: {variable!r}. Use 'temperature', 'precipitation', "
+            "'atmospheric_river', 'tcwv', or 'precip_and_tcwv'."
         )
 
 
@@ -313,12 +390,15 @@ def load_hres_zarr(variable: str = "temperature") -> xr.Dataset:
                   ``"atmospheric_river"`` or ``"ivt"`` returns
                   ``eastward_wind``, ``northward_wind``, ``specific_humidity``
                   on the common AR pressure levels.
+                  ``"tcwv"`` or ``"total_column_water_vapour"`` returns
+                  ``specific_humidity`` on the 13 common TCWV pressure levels.
     """
     _ensure_gcs_anon()
     logger.info("Connecting to HRES WeatherBench2 zarr store...")
     ds = xr.open_zarr(
         "gs://weatherbench2/datasets/hres/2016-2022-0012-1440x721.zarr",
         storage_options={"token": "anon"},
+        chunks=None,
     )
     ds = ds.rename({"prediction_timedelta": "lead_time", "time": "init_time"})
 
@@ -346,9 +426,13 @@ def load_hres_zarr(variable: str = "temperature") -> xr.Dataset:
         ds = ds[["eastward_wind", "northward_wind", "specific_humidity"]]
         avail_levels = [lvl for lvl in AR_IVT_LEVELS if lvl in ds.level.values]
         return ds.sel(level=avail_levels)
+    elif variable in ("tcwv", "total_column_water_vapour"):
+        ds = ds[["specific_humidity"]]
+        avail_levels = [lvl for lvl in TCWV_LEVELS if lvl in ds.level.values]
+        return ds.sel(level=avail_levels)
     else:
         raise ValueError(
-            f"Unknown variable: {variable!r}. Use 'temperature', 'precipitation', or 'atmospheric_river'."
+            f"Unknown variable: {variable!r}. Use 'temperature', 'precipitation', 'atmospheric_river', or 'tcwv'."
         )
 
 

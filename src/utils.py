@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -86,6 +87,69 @@ def extreme_area_ratio(
 # ============================================================
 # Data Conversion & Alignment
 # ============================================================
+
+AR_IVT_LEVELS = (300, 400, 500, 600, 700, 850, 925, 1000)
+
+
+def compute_ivt_from_dataset(
+    ds: xr.Dataset,
+    u_var: str = "eastward_wind",
+    v_var: str = "northward_wind",
+    q_var: str = "specific_humidity",
+    levels: Sequence[int] | None = AR_IVT_LEVELS,
+) -> xr.DataArray:
+    """
+    Compute Integrated Vapor Transport (IVT) using ExtremeWeatherBench's standard
+    trapezoid integration over pressure levels (300 to 1000 hPa) divided by g0.
+    """
+    from extremeweatherbench.events.atmospheric_river import integrated_vapor_transport
+
+    if levels is not None and "level" in ds.dims:
+        avail_levels = [lvl for lvl in levels if lvl in ds.level.values]
+        ds = ds.sel(level=avail_levels)
+    if "level" in ds.dims:
+        ds = ds.sortby("level")
+
+    ivt = integrated_vapor_transport(
+        specific_humidity=ds[q_var],
+        eastward_wind=ds[u_var],
+        northward_wind=ds[v_var],
+    )
+    ivt.name = "integrated_vapor_transport"
+    return ivt
+
+
+def aurora_batch_to_ivt_xarray(
+    predicted_batch,
+    init_time,
+    lead_time_hours: int,
+    levels: Sequence[int] = AR_IVT_LEVELS,
+) -> xr.Dataset:
+    """
+    Compute 2D Integrated Vapor Transport (IVT) from a single Aurora Batch prediction
+    and return an xarray Dataset with dims [init_time, lead_time, latitude, longitude].
+    """
+    atmos_ds = aurora_batch_to_xarray(
+        predicted_batch,
+        init_time=init_time,
+        lead_time_hours=lead_time_hours,
+        include_atmos=True,
+        atmos_levels=list(levels),
+        atmos_vars=["u", "v", "q"],
+    )
+    ivt_da = compute_ivt_from_dataset(
+        atmos_ds, u_var="u", v_var="v", q_var="q", levels=levels
+    ).compute()
+
+    return xr.Dataset(
+        data_vars={"integrated_vapor_transport": ivt_da},
+        coords={
+            "init_time": atmos_ds.coords["init_time"],
+            "lead_time": atmos_ds.coords["lead_time"],
+            "latitude": atmos_ds.coords["latitude"],
+            "longitude": atmos_ds.coords["longitude"],
+        },
+    )
 
 
 def aurora_batch_to_xarray(
@@ -207,6 +271,9 @@ def load_era5_zarr(variable: str = "temperature") -> xr.Dataset:
         variable: ``"temperature"`` returns ``surface_air_temperature``
                   (renamed from ``2m_temperature``).
                   ``"precipitation"`` returns ``total_precipitation``.
+                  ``"atmospheric_river"`` or ``"ivt"`` returns
+                  ``eastward_wind``, ``northward_wind``, ``specific_humidity``
+                  on the common AR pressure levels.
     """
     _ensure_gcs_anon()
     logger.info("Connecting to ARCO ERA5 zarr store...")
@@ -219,9 +286,19 @@ def load_era5_zarr(variable: str = "temperature") -> xr.Dataset:
         return ds[["surface_air_temperature"]]
     elif variable == "precipitation":
         return ds[["total_precipitation"]]
+    elif variable in ("atmospheric_river", "ivt"):
+        ds = ds.rename(
+            {
+                "u_component_of_wind": "eastward_wind",
+                "v_component_of_wind": "northward_wind",
+            }
+        )
+        ds = ds[["eastward_wind", "northward_wind", "specific_humidity"]]
+        avail_levels = [lvl for lvl in AR_IVT_LEVELS if lvl in ds.level.values]
+        return ds.sel(level=avail_levels)
     else:
         raise ValueError(
-            f"Unknown variable: {variable!r}. Use 'temperature' or 'precipitation'."
+            f"Unknown variable: {variable!r}. Use 'temperature', 'precipitation', or 'atmospheric_river'."
         )
 
 
@@ -233,6 +310,9 @@ def load_hres_zarr(variable: str = "temperature") -> xr.Dataset:
         variable: ``"temperature"`` returns ``surface_air_temperature``.
                   ``"precipitation"`` returns ``total_precipitation_6hr``
                   (or fallback).
+                  ``"atmospheric_river"`` or ``"ivt"`` returns
+                  ``eastward_wind``, ``northward_wind``, ``specific_humidity``
+                  on the common AR pressure levels.
     """
     _ensure_gcs_anon()
     logger.info("Connecting to HRES WeatherBench2 zarr store...")
@@ -256,9 +336,19 @@ def load_hres_zarr(variable: str = "temperature") -> xr.Dataset:
                 f"Available: {list(ds.data_vars.keys())}"
             )
             return ds
+    elif variable in ("atmospheric_river", "ivt"):
+        ds = ds.rename(
+            {
+                "u_component_of_wind": "eastward_wind",
+                "v_component_of_wind": "northward_wind",
+            }
+        )
+        ds = ds[["eastward_wind", "northward_wind", "specific_humidity"]]
+        avail_levels = [lvl for lvl in AR_IVT_LEVELS if lvl in ds.level.values]
+        return ds.sel(level=avail_levels)
     else:
         raise ValueError(
-            f"Unknown variable: {variable!r}. Use 'temperature' or 'precipitation'."
+            f"Unknown variable: {variable!r}. Use 'temperature', 'precipitation', or 'atmospheric_river'."
         )
 
 

@@ -566,7 +566,6 @@ def generate_forecasts(
                     time_01 = time.perf_counter() - t_start_01
                     ram_01 = _get_ram_mb()
                     gpu_mem_01 = _get_gpu_peak_mem_mb()
-
                     total_time_sec = time_025 + time_01
                     peak_ram_mb = max(ram_025, ram_01)
                     peak_gpu_mem_mb = max(gpu_mem_025, gpu_mem_01)
@@ -583,7 +582,18 @@ def generate_forecasts(
                         f"  [Regional_0.1_BC | {lt_h}h] Time: {total_time_sec:.2f}s | "
                         f"RAM: {peak_ram_mb:.1f} MiB | GPU Mem: {peak_gpu_mem_mb:.1f} MiB"
                     )
-
+                    resource_rows.append({
+                        "init_time": init_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                        "lead_time_hours": lt_h,
+                        "model": "0.1+bc",
+                        "time_sec": round(time_01, 2),
+                        "ram_usage_MiB": round(ram_01, 1),
+                        "gpu_memory_MiB": round(gpu_mem_01, 1),
+                    })
+                    logger.info(
+                        f"  [0.1+bc | {lt_h}h] Time: {time_01:.2f}s | "
+                        f"RAM: {ram_01:.1f} MiB | GPU Mem: {gpu_mem_01:.1f} MiB"
+                    )
                     if lt_h == max(LEAD_TIMES_H):
                         _save_forecast_netcdf(regional_01_batches, init_dt, LEAD_TIMES_H, out_file_r01_bc)
 

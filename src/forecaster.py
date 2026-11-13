@@ -78,6 +78,36 @@ class AuroraForecaster:
             
         return predictions
 
+    def stream_rollout(
+        self,
+        initial_batch: Batch,
+        steps: int,
+        fine_lead_times: list[float] = None,
+    ):
+        """
+        Stream autoregressive rollout step-by-step as a generator, yielding one
+        CPU Batch at a time so previous steps can be garbage-collected immediately
+        instead of accumulating all steps in system RAM.
+        """
+        kwargs = {"steps": steps}
+        if fine_lead_times is not None:
+            kwargs["fine_lead_times"] = fine_lead_times
+        elif getattr(self.model, "variable_lead_time", False):
+            kwargs["fine_lead_times"] = [6.0]
+
+        current_batch = initial_batch
+        num_sub_steps = len(kwargs.get("fine_lead_times", [6.0]))
+        total_preds = steps * num_sub_steps
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print(f"Streaming {steps}-step AR rollout ({total_preds} total predictions)...")
+
+        with torch.inference_mode():
+            for pred in rollout(self.model, current_batch, **kwargs):
+                yield pred.to("cpu")
+
     def save_predictions(self, predictions: Batch | list[Batch], save_path: Path):
         """
         Saves the predicted batches to the hard drive.

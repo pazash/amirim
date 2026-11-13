@@ -123,32 +123,35 @@ def generate_tcwv_forecasts(
                 if predict:
                     total_hours_to_roll = start_lead + event_duration_hours
                     total_steps_needed = int(total_hours_to_roll / 6)
-
-                    predicted_batches = forecaster.predict_rollout(
-                        initial_batch=input_batch,
-                        steps=total_steps_needed,
-                        fine_lead_times=[6.0],
-                    )
-
                     start_index = max(0, int(start_lead / 6) - 1)
 
                     event_ds_list = []
-                    for i, batch in enumerate(predicted_batches[start_index:]):
-                        current_lead_time = start_lead + (i * 6)
-                        step_ds = aurora_batch_to_tcwv_xarray(
-                            batch,
-                            init_time=init_time,
-                            lead_time_hours=current_lead_time,
-                            levels=TCWV_LEVELS,
+                    for step_idx, batch in enumerate(
+                        forecaster.stream_rollout(
+                            initial_batch=input_batch,
+                            steps=total_steps_needed,
+                            fine_lead_times=[6.0],
                         )
-                        event_ds_list.append(step_ds)
+                    ):
+                        if step_idx >= start_index:
+                            i = step_idx - start_index
+                            current_lead_time = start_lead + (i * 6)
+                            step_ds = aurora_batch_to_tcwv_xarray(
+                                batch,
+                                init_time=init_time,
+                                lead_time_hours=current_lead_time,
+                                levels=TCWV_LEVELS,
+                            )
+                            event_ds_list.append(step_ds)
+                        del batch
 
                     if event_ds_list:
                         full_event_ds = xr.concat(event_ds_list, dim="lead_time")
                         full_event_ds.to_netcdf(filename, engine="h5netcdf")
                         logger.info(f"Saved {filename}")
+                        del full_event_ds
 
-                    del predicted_batches, event_ds_list
+                    del event_ds_list
                 del input_batch
                 gc.collect()
                 if torch.cuda.is_available():
@@ -186,8 +189,10 @@ def evaluate_tcwv_events(
             f"Evaluating Case {case.case_id_number}: {case.title} ({case_idx+1}/{len(PRECIP_CASES)})"
         )
 
-        # Download ERA5 specific_humidity for this case and vertically integrate to TCWV
+        # Download ERA5 specific_humidity for this case at 6-hourly intervals and vertically integrate to TCWV
         era5_case_raw = era5_ds.sel(time=slice(case.start_date, case.end_date))
+        six_hr_mask = era5_case_raw.time.dt.hour.isin([0, 6, 12, 18])
+        era5_case_raw = era5_case_raw.isel(time=np.where(six_hr_mask.values)[0])
         era5_case_raw = case.location.mask(era5_case_raw).compute()
         era5_case_raw = standardize_longitude(era5_case_raw)
 
@@ -195,6 +200,7 @@ def evaluate_tcwv_events(
             era5_case_raw, q_var="specific_humidity", levels=TCWV_LEVELS
         ).compute()
         del era5_case_raw
+        gc.collect()
 
         case_files = [f for f in nc_files if f"_{case.case_id_number}.nc" in f.name]
         start_dt = pd.to_datetime(case.start_date)
@@ -229,10 +235,18 @@ def evaluate_tcwv_events(
                 hres_fcst_raw = hres_ds.sel(init_time=init_t, method="pad")
                 hres_init_t = hres_fcst_raw.init_time.values
 
-                # Slice HRES lead_times to the event window before downloading 3D specific_humidity
-                hres_valid_times = hres_init_t + hres_fcst_raw.lead_time.values
-                in_window_mask = (hres_valid_times >= start_dt) & (
-                    hres_valid_times <= end_dt
+                # Slice HRES lead_times to the event window before downloading 3D specific_humidity.
+                # WeatherBench2 HRES lead_time can be stored as integer hours (0, 6, ..., 240)
+                # or timedelta64 depending on xarray's decode_timedelta behavior.
+                if np.issubdtype(hres_fcst_raw.lead_time.dtype, np.timedelta64):
+                    lead_td = pd.to_timedelta(hres_fcst_raw.lead_time.values)
+                else:
+                    lead_td = pd.to_timedelta(
+                        hres_fcst_raw.lead_time.values, unit="h"
+                    )
+                hres_valid_times = pd.to_datetime(hres_init_t) + lead_td
+                in_window_mask = np.asarray(
+                    (hres_valid_times >= start_dt) & (hres_valid_times <= end_dt)
                 )
                 if np.any(in_window_mask):
                     hres_fcst_raw = hres_fcst_raw.isel(
@@ -247,8 +261,14 @@ def evaluate_tcwv_events(
                     has_hres = True
                 else:
                     has_hres = False
-            except KeyError:
+                    logger.warning(
+                        f"  HRES has no lead times overlapping window [{start_dt}, {end_dt}] for init_time {hres_init_t}"
+                    )
+            except KeyError as e:
                 has_hres = False
+                logger.warning(
+                    f"  No matching HRES found for init_time {init_t}: {e}"
+                )
 
             for lt in aurora_fcst.lead_time.values:
                 valid_time = init_t + lt
@@ -316,11 +336,15 @@ def evaluate_tcwv_events(
                             if np.issubdtype(
                                 hres_tcwv.lead_time.dtype, np.timedelta64
                             ):
-                                fcst_2d_hres = hres_tcwv.sel(lead_time=hres_lt)
+                                fcst_2d_hres = hres_tcwv.sel(
+                                    lead_time=pd.to_timedelta(hres_lt)
+                                )
                             else:
                                 fcst_2d_hres = hres_tcwv.sel(lead_time=hres_lt_hours)
-                        except KeyError:
-                            pass
+                        except KeyError as e:
+                            logger.warning(
+                                f"  HRES missing lead_time {hres_lt_hours}h for init {hres_init_t}: {e}"
+                            )
                         else:
                             fcst_arr_hres, tgt_arr_hres = align_and_subset_2d(
                                 fcst_2d_hres, tgt_2d
@@ -362,6 +386,11 @@ def evaluate_tcwv_events(
                                 )
 
             aurora_fcst.close()
+            if has_hres:
+                del hres_tcwv
+            gc.collect()
+        del era5_tcwv
+        gc.collect()
 
     df = pd.DataFrame(results)
     if not df.empty:

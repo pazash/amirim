@@ -135,18 +135,22 @@ def aurora_batch_to_tcwv_xarray(
         atmos_levels=list(levels),
         atmos_vars=["q"],
     )
-    tcwv_da = compute_tcwv_from_dataset(
-        atmos_ds, q_var="q", levels=levels
-    ).compute()
+    tcwv_da = (
+        compute_tcwv_from_dataset(atmos_ds, q_var="q", levels=levels)
+        .compute()
+        .astype(np.float32)
+    )
+    coords = {
+        "init_time": atmos_ds.coords["init_time"],
+        "lead_time": atmos_ds.coords["lead_time"],
+        "latitude": atmos_ds.coords["latitude"],
+        "longitude": atmos_ds.coords["longitude"],
+    }
+    del atmos_ds
 
     return xr.Dataset(
         data_vars={"total_column_water_vapour": tcwv_da},
-        coords={
-            "init_time": atmos_ds.coords["init_time"],
-            "lead_time": atmos_ds.coords["lead_time"],
-            "latitude": atmos_ds.coords["latitude"],
-            "longitude": atmos_ds.coords["longitude"],
-        },
+        coords=coords,
     )
 
 
@@ -196,18 +200,24 @@ def aurora_batch_to_ivt_xarray(
         atmos_levels=list(levels),
         atmos_vars=["u", "v", "q"],
     )
-    ivt_da = compute_ivt_from_dataset(
-        atmos_ds, u_var="u", v_var="v", q_var="q", levels=levels
-    ).compute()
+    ivt_da = (
+        compute_ivt_from_dataset(
+            atmos_ds, u_var="u", v_var="v", q_var="q", levels=levels
+        )
+        .compute()
+        .astype(np.float32)
+    )
+    coords = {
+        "init_time": atmos_ds.coords["init_time"],
+        "lead_time": atmos_ds.coords["lead_time"],
+        "latitude": atmos_ds.coords["latitude"],
+        "longitude": atmos_ds.coords["longitude"],
+    }
+    del atmos_ds
 
     return xr.Dataset(
         data_vars={"integrated_vapor_transport": ivt_da},
-        coords={
-            "init_time": atmos_ds.coords["init_time"],
-            "lead_time": atmos_ds.coords["lead_time"],
-            "latitude": atmos_ds.coords["latitude"],
-            "longitude": atmos_ds.coords["longitude"],
-        },
+        coords=coords,
     )
 
 

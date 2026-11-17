@@ -107,6 +107,18 @@ def plot_distributions_vs_baselines(df: pd.DataFrame, output_dir: Path) -> None:
         palette="Set2",
         showfliers=False,
     )
+    sns.stripplot(
+        data=sub_df[sub_df["evaluation_mode"] == "event_aggregated"],
+        x="metric",
+        y="value",
+        order=unit_metrics,
+        color="black",
+        size=6,
+        jitter=0.1,
+        alpha=0.8,
+        label="Event Mean (10 Cases)",
+        ax=ax,
+    )
 
     # Draw baseline horizontal segments per metric
     for idx, m in enumerate(unit_metrics):
@@ -121,7 +133,6 @@ def plot_distributions_vs_baselines(df: pd.DataFrame, output_dir: Path) -> None:
             label="Random / Skill Baseline" if idx == 0 else None,
         )
 
-    ax.set_xticks(range(len(unit_metrics)))
     ax.set_xticklabels([m.replace("_", " ") for m in unit_metrics], rotation=28, ha="right")
     ax.set_title(
         "ERA5 Precipitation vs. TCWV Coupling Metrics Compared to Random/Skill Baselines"

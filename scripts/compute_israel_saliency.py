@@ -97,11 +97,19 @@ def _clear_caches() -> None:
         torch.cuda.empty_cache()
 
 
-def _detach_batch_to_cpu(batch: Batch) -> Batch:
+def _detach_batch_to_cpu(
+    batch: Batch,
+    shared_static_vars: dict[str, torch.Tensor] | None = None,
+) -> Batch:
     """Detach all tensors in a Batch and move them to CPU RAM."""
+    static_cpu = (
+        shared_static_vars
+        if shared_static_vars is not None
+        else {k: v.detach().cpu() for k, v in batch.static_vars.items()}
+    )
     return Batch(
         surf_vars={k: v.detach().cpu() for k, v in batch.surf_vars.items()},
-        static_vars={k: v.detach().cpu() for k, v in batch.static_vars.items()},
+        static_vars=static_cpu,
         atmos_vars={k: v.detach().cpu() for k, v in batch.atmos_vars.items()},
         metadata=dataclasses.replace(
             batch.metadata,
@@ -228,9 +236,12 @@ def collect_rollout_step_inputs(
         else None
     )
 
+    shared_static_cpu = {k: v.detach().cpu() for k, v in batch.static_vars.items()}
     step_inputs_cpu: list[Batch] = []
     for step_idx in range(max_steps):
-        step_inputs_cpu.append(_detach_batch_to_cpu(batch))
+        step_inputs_cpu.append(
+            _detach_batch_to_cpu(batch, shared_static_vars=shared_static_cpu)
+        )
         if step_idx < max_steps - 1:
             pred = model.forward(batch, lead_times=base_lead_times)
             pred = model.apply_rollout_input_clipping(pred)

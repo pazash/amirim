@@ -19,6 +19,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import logging
 import os
 import sys
@@ -69,10 +70,12 @@ DEFAULT_IG_STEPS = 8
 class ClimatologyBaselineBuilder:
     """
     Downloads (once per calendar month) and caches the 30-year (1991–2020) ERA5
-    monthly-averaged reanalysis by hour of day (`00:00, 06:00, 12:00, 18:00 UTC`)
+    monthly-averaged reanalysis by hour of day (`06:00, 12:00 UTC`)
     at 0.25° global resolution, and constructs an `aurora.Batch` baseline X_base
     matching any target initialization datetime `t0_dt`.
     """
+
+    CLIM_HOURS = ("06:00", "12:00")
 
     def __init__(
         self,
@@ -94,10 +97,62 @@ class ClimatologyBaselineBuilder:
         )
 
     @staticmethod
-    def _open_cds_netcdf_or_zip(raw_path: Path) -> xr.Dataset:
+    def _average_single_netcdf_by_hour(nc_path: Path) -> xr.Dataset:
         """
-        Open a NetCDF file returned by CDS API, transparently handling the case where
-        the new CDS infrastructure packages NetCDF file(s) inside a ZIP archive.
+        Lazily stream a single NetCDF file variable-by-variable and hour-by-hour,
+        averaging across years without loading the full multi-year cube into RAM.
+        """
+        data_vars_out: dict[str, xr.DataArray] = {}
+        with xr.open_dataset(nc_path, engine="netcdf4") as ds_raw:
+            ds = AuroraDataLoader._normalize_era5(ds_raw)
+            hours_vals = ds["time"].dt.hour.values
+            unique_hours = sorted(int(h) for h in np.unique(hours_vals))
+
+            for var_name in list(ds.data_vars):
+                hour_slices: list[xr.DataArray] = []
+                for hr in unique_hours:
+                    time_mask = hours_vals == hr
+                    da_slice = ds[var_name].isel(time=time_mask)
+                    if "level" in da_slice.dims:
+                        level_means: list[xr.DataArray] = []
+                        for lvl in da_slice["level"].values:
+                            da_lvl = da_slice.sel(level=lvl)
+                            if "expver" in da_lvl.dims:
+                                da_lvl = da_lvl.mean(dim="expver", skipna=True)
+                            da_lvl_mean = (
+                                da_lvl.mean(dim="time", skipna=True)
+                                .astype(np.float32)
+                                .load()
+                            )
+                            level_means.append(da_lvl_mean)
+                            del da_lvl, da_lvl_mean
+                        da_mean = xr.concat(level_means, dim="level")
+                        del level_means
+                    else:
+                        if "expver" in da_slice.dims:
+                            da_slice = da_slice.mean(dim="expver", skipna=True)
+                        da_mean = (
+                            da_slice.mean(dim="time", skipna=True)
+                            .astype(np.float32)
+                            .load()
+                        )
+                    for drop_coord in ("number", "expver"):
+                        if drop_coord in da_mean.coords:
+                            da_mean = da_mean.drop_vars(drop_coord)
+                    hour_slices.append(da_mean.expand_dims(hour=[hr]))
+                    del da_slice, da_mean
+
+                data_vars_out[var_name] = xr.concat(hour_slices, dim="hour")
+                del hour_slices
+                _clear_caches()
+
+        return xr.Dataset(data_vars_out)
+
+    @classmethod
+    def _compute_hourly_climatology_from_file(cls, raw_path: Path) -> xr.Dataset:
+        """
+        Stream-average a CDS NetCDF (or ZIP archive of NetCDF files) by hour of day
+        into a compact `float32` Dataset with dimension `hour`.
         """
         if zipfile.is_zipfile(raw_path):
             with tempfile.TemporaryDirectory() as tmp_dir:
@@ -106,29 +161,12 @@ class ClimatologyBaselineBuilder:
                 nc_files = sorted(Path(tmp_dir).rglob("*.nc"))
                 if not nc_files:
                     raise RuntimeError(f"No .nc files found inside ZIP archive {raw_path}")
-                datasets = []
-                for f in nc_files:
-                    with xr.open_dataset(f, engine="netcdf4") as ds_part:
-                        datasets.append(AuroraDataLoader._normalize_era5(ds_part).load())
-                return xr.merge(datasets, compat="override")
-        else:
-            with xr.open_dataset(raw_path, engine="netcdf4") as ds_raw:
-                return AuroraDataLoader._normalize_era5(ds_raw).load()
-
-    @staticmethod
-    def _average_over_years_by_hour(ds: xr.Dataset) -> xr.Dataset:
-        """
-        Collapse the multi-year `time` dimension into a 4-step `hour` dimension
-        (0, 6, 12, 18 UTC) by averaging across all years for each hour of day.
-        """
-        if "expver" in ds.dims:
-            ds = ds.reduce(np.nanmean, dim="expver")
-        for drop_coord in ("number", "expver"):
-            if drop_coord in ds.coords:
-                ds = ds.drop_vars(drop_coord)
-
-        clim_by_hour = ds.groupby("time.hour").mean(dim="time", skipna=True)
-        return clim_by_hour.load()
+                datasets = [cls._average_single_netcdf_by_hour(f) for f in nc_files]
+                merged = xr.merge(datasets, compat="override")
+                del datasets
+                _clear_caches()
+                return merged
+        return cls._average_single_netcdf_by_hour(raw_path)
 
     def ensure_month_climatology(self, month: int) -> Path:
         """
@@ -140,7 +178,7 @@ class ClimatologyBaselineBuilder:
             return clim_path
 
         years = [str(y) for y in range(self.start_year, self.end_year + 1)]
-        times = ["00:00", "06:00", "12:00", "18:00"]
+        times = list(self.CLIM_HOURS)
         c = cdsapi.Client()
 
         raw_surf_path = (
@@ -195,8 +233,8 @@ class ClimatologyBaselineBuilder:
             )
 
         logger.info(f"Computing {self.start_year}–{self.end_year} per-pixel mean for month {month:02d}...")
-        ds_surf = self._average_over_years_by_hour(self._open_cds_netcdf_or_zip(raw_surf_path))
-        ds_atmos = self._average_over_years_by_hour(self._open_cds_netcdf_or_zip(raw_atmos_path))
+        ds_surf = self._compute_hourly_climatology_from_file(raw_surf_path)
+        ds_atmos = self._compute_hourly_climatology_from_file(raw_atmos_path)
 
         ds_clim = xr.merge([ds_surf, ds_atmos], compat="override")
         ds_clim.attrs["climatology_years"] = f"{self.start_year}-{self.end_year}"
@@ -204,6 +242,7 @@ class ClimatologyBaselineBuilder:
         ds_clim.to_netcdf(clim_path, engine="h5netcdf")
 
         del ds_surf, ds_atmos, ds_clim
+        _clear_caches()
         # Remove temporary multi-year raw files after saving compact averaged climatology
         raw_surf_path.unlink(missing_ok=True)
         raw_atmos_path.unlink(missing_ok=True)
@@ -425,6 +464,9 @@ def run_ig_saliency_evaluation(
             baseline_batch = clim_builder.get_baseline_batch(
                 init_dt, history_steps=1, bbox=None
             )
+            baseline_batch = dataclasses.replace(
+                baseline_batch, static_vars=target_batch.static_vars
+            )
         except Exception as e:
             logger.error(
                 f"Failed to load target or climatology baseline batch for {init_dt}: {e}",
@@ -476,11 +518,9 @@ def run_ig_saliency_evaluation(
                 )
                 for v in ATMOS_VARS:
                     if v not in accum_grads_by_lt[lt_h]:
-                        accum_grads_by_lt[lt_h][v] = grads_m[v] / float(ig_steps)
+                        accum_grads_by_lt[lt_h][v] = grads_m[v].mul_(1.0 / float(ig_steps))
                     else:
-                        accum_grads_by_lt[lt_h][v] = (
-                            accum_grads_by_lt[lt_h][v] + grads_m[v] / float(ig_steps)
-                        )
+                        accum_grads_by_lt[lt_h][v].add_(grads_m[v], alpha=1.0 / float(ig_steps))
                 del grads_m
 
             del step_inputs_cpu

@@ -16,7 +16,7 @@ This is a **Bachelor's degree project** in Computer Science and Earth Science.
 2. Evaluate the finetuned model against the pretrained model across multiple lead times (6h–120h).
 3. Measure whether regional training context improves predictions within the target region.
 
-**Side investigation (currently deprioritized)**: An earlier direction explored whether Aurora struggles with extreme weather events (heatwaves, heavy precipitation). Initial findings showed the pretrained Aurora base model already outperforms the HRES physical model on heatwave metrics — a surprising result that redirected focus to regional fine-tuning. The extreme-weather scripts remain in the repo under `scripts/extreme_scripts/`.
+**Side investigation (currently deprioritized)**: An earlier direction explored whether Aurora struggles with extreme weather events (heatwaves, heavy precipitation). Initial findings showed the pretrained Aurora base model already outperforms the HRES physical model on heatwave metrics — a surprising result that redirected focus to regional fine-tuning. The extreme-weather scripts remain in the repo under `scripts/extremes/`.
 
 ---
 
@@ -64,7 +64,8 @@ These are importable, reusable modules. All experiment-specific logic lives in `
 #### Visualization
 - **`plot_context_comparison.py`**, **`plot_finetune_comparison.py`**, **`plot_benchmark_resources.py`**, **`plot_scope_temperature_maps.py`** — Generate publication-quality figures.
 
-#### Extreme Weather (`extreme_scripts/`)
+#### Extreme Weather (`scripts/extremes/`)
+Subfolders: `heatwaves/`, `precipitation/`, and `atmospheric_rivers/`.
 - **`extreme_evaluator.py`** — Early prototype using ExtremeWeatherBench.
 - **`heatwave_evaluator.py`** — Direct heatwave evaluation against cloud ERA5/HRES Zarr stores.
 - **`normal_weather_evaluator.py`** — Normal-weather baseline evaluator.

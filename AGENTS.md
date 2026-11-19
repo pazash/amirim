@@ -12,8 +12,9 @@ data to improve forecast performance.
 * `src/` – Core reusable library modules for ERA5 data loading (`dataloader.py`), model inference
   and rollouts (`forecaster.py`), forecast verification (`evaluator.py`), and shared utilities
   (`utils.py`).
-* `scripts/` – Executable experiment, fine-tuning, resource benchmarking, and plotting scripts,
-  including `extreme_scripts/` for extreme weather evaluations.
+* `scripts/` – Executable experiment, fine-tuning, resource benchmarking, and plotting scripts
+  organized by domain (`finetuning/`, `spatial_context/`, `saliency/`, `benchmarking/`, and
+  `extremes/`).
 * `docs/` – Scientific specifications of evaluation metrics, curated extreme event catalogs, and
   project documentation.
 * `plots/` – Generated figures and comparative charts organized by experiment type.
@@ -31,16 +32,16 @@ pip install microsoft-aurora extremeweatherbench peft psutil
 Run primary experiments and evaluations (execute from repository root):
 ```bash
 # Fine-tune the model
-python scripts/finetune_aurora_6h.py
+python scripts/finetuning/finetune_aurora_6h.py
 
 # Evaluate pretrained vs finetuned
-python scripts/evaluate_pretrained_vs_finetuned.py
+python scripts/finetuning/evaluate_pretrained_vs_finetuned.py
 
 # Compare spatial contexts
-python scripts/compare_global_vs_med_aurora.py
+python scripts/spatial_context/compare_global_vs_med_aurora.py
 
 # Generate plots
-python scripts/plot_finetune_comparison.py
+python scripts/finetuning/plot_finetune_comparison.py
 ```
 
 ## Code Style & Conventions

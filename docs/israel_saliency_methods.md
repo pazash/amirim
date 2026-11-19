@@ -7,9 +7,9 @@
 > **Target Region (`ISRAEL_BBOX`)**: `lat ∈ [29.5°N, 33.5°N]`, `lon ∈ [34.25°E, 35.75°E]` ($17 \times 7$ grid points on the $0.25^\circ$ global grid).
 >
 > **Scripts**:
-> - Vanilla Gradient Saliency: [`scripts/compute_israel_saliency.py`](../scripts/compute_israel_saliency.py)
-> - Integrated Gradients (IG) Saliency: [`scripts/compute_israel_ig_saliency.py`](../scripts/compute_israel_ig_saliency.py)
-> - Visualization & Comparison: [`scripts/plot_israel_saliency_maps.py`](../scripts/plot_israel_saliency_maps.py)
+> - Vanilla Gradient Saliency: [`scripts/saliency/compute_israel_saliency.py`](../scripts/saliency/compute_israel_saliency.py)
+> - Integrated Gradients (IG) Saliency: [`scripts/saliency/compute_israel_ig_saliency.py`](../scripts/saliency/compute_israel_ig_saliency.py)
+> - Visualization & Comparison: [`scripts/saliency/plot_israel_saliency_maps.py`](../scripts/saliency/plot_israel_saliency_maps.py)
 
 ---
 

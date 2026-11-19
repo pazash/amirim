@@ -12,7 +12,7 @@ Global training objectives average gradients over the entire sphere, under-repre
 
 ### Extreme Weather — Side Investigation
 
-An initial direction of this project explored whether Aurora's base model struggles with **extreme weather events** (heatwaves, heavy precipitation). Preliminary results showed that the pretrained Aurora base model *already outperforms* the HRES physical model on several heatwave metrics — an unexpected finding that shifted focus toward the regional fine-tuning approach. The extreme-weather evaluation scripts and documentation remain in the repository under `scripts/extreme_scripts/` and `docs/` for reference.
+An initial direction of this project explored whether Aurora's base model struggles with **extreme weather events** (heatwaves, heavy precipitation). Preliminary results showed that the pretrained Aurora base model *already outperforms* the HRES physical model on several heatwave metrics — an unexpected finding that shifted focus toward the regional fine-tuning approach. The extreme-weather evaluation scripts and documentation remain in the repository under `scripts/extremes/` and `docs/` for reference.
 
 ---
 
@@ -25,16 +25,11 @@ amirim/
 │   └── forecaster.py             # Model forward passes and autoregressive rollouts
 │
 ├── scripts/                      # Executable experiment scripts
-│   ├── finetune_aurora_6h.py     # LoRA fine-tuning pipeline
-│   ├── evaluate_pretrained_vs_finetuned.py
-│   ├── compare_global_vs_med_aurora.py
-│   ├── compute_forecast_skill.py
-│   ├── benchmark_aurora_resources.py
-│   ├── plot_context_comparison.py
-│   ├── plot_finetune_comparison.py
-│   ├── plot_benchmark_resources.py
-│   ├── plot_scope_temperature_maps.py
-│   └── extreme_scripts/          # Extreme weather evaluation (side investigation)
+│   ├── finetuning/               # LoRA fine-tuning & evaluation
+│   ├── spatial_context/          # Global vs. regional context & 0.1° BC experiments
+│   ├── saliency/                 # Gradient & IG saliency for Israel/Mediterranean
+│   ├── benchmarking/             # Compute / RAM / GPU resource profiling
+│   └── extremes/                 # Extreme weather evaluations (heatwaves, precipitation, atmospheric_rivers)
 │
 ├── docs/                         # Project documentation
 │   ├── ai_project_context.md     # AI assistant context for this repo
@@ -90,7 +85,7 @@ Thin wrapper around the Aurora model that manages:
 | **`plot_benchmark_resources.py`** | Plots wall-clock time, GPU memory, and CPU RAM vs. lead time for each scope, plus speedup bar charts relative to Global. |
 | **`plot_scope_temperature_maps.py`** | Creates side-by-side geographic maps (Cartopy) of 2m temperature forecasts from each scope vs. ERA5 ground truth, with shared colour scales. |
 
-### Extreme Weather Scripts (`extreme_scripts/`)
+### Extreme Weather Scripts (`scripts/extremes/`)
 
 | Script | Summary |
 |---|---|
@@ -127,16 +122,16 @@ All scripts should be run from the project root:
 
 ```bash
 # Fine-tune the model
-python scripts/finetune_aurora_6h.py
+python scripts/finetuning/finetune_aurora_6h.py
 
 # Evaluate pretrained vs finetuned
-python scripts/evaluate_pretrained_vs_finetuned.py
+python scripts/finetuning/evaluate_pretrained_vs_finetuned.py
 
 # Compare spatial contexts
-python scripts/compare_global_vs_med_aurora.py
+python scripts/spatial_context/compare_global_vs_med_aurora.py
 
 # Generate plots
-python scripts/plot_finetune_comparison.py
+python scripts/finetuning/plot_finetune_comparison.py
 ```
 
 ---

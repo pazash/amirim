@@ -35,6 +35,7 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Sequence
 
@@ -52,30 +53,31 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", message="Mean of empty slice")
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="The 'generic' unit for NumPy timedelta is deprecated",
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from aurora import AuroraV1p5
 from scripts.extremes.heatwaves.oos_heatwave_evaluator import (
-    DEFAULT_MODELS,
     DEFAULT_START_LEADS,
-    MODEL_CONFIGS,
-    PRETRAINED_CACHE_DIR,
-    _append_metric_rows,
     _select_hres_lead,
     align_to_synoptic_12h,
     compute_all_metrics,
     forecast_filename,
-    load_aurora_025_model,
 )
 from src.dataloader import AuroraDataLoader
 from src.forecaster import AuroraForecaster
 from src.utils import (
     align_and_subset_2d,
     aurora_batch_to_xarray,
-    filter_batch_for_pretrained,
     load_era5_zarr,
     load_hres_zarr,
     standardize_longitude,
+    timedelta_to_hours,
 )
 
 logger = logging.getLogger(__name__)
@@ -83,9 +85,19 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
 )
 
+MODEL_CONFIGS: dict[str, dict[str, object]] = {
+    "v1p5": {
+        "checkpoint": "aurora-0.25-v1.5.ckpt",
+        "cutoff_year": 2023,  # Trained 1981-2023 -> 2016-2020 is in-sample
+        "label": "aurora_v1p5",
+    },
+}
+
+DEFAULT_MODELS: tuple[str, ...] = ("v1p5",)
 DEFAULT_YEARS: tuple[int, ...] = (2016, 2017, 2018, 2019, 2020)
 DEFAULT_FORECAST_DIR = Path("ewb_insample_hw_forecasts")
 DEFAULT_OUTPUT_CSV = Path("insample_heatwave_evaluations.csv")
+V1P5_CACHE_DIR = Path("weather_data/v1.5")
 
 
 @dataclass
@@ -259,6 +271,58 @@ def get_insample_heatwave_cases(
     return cases
 
 
+def load_aurora_025_model(model_key: str):
+    """Instantiate and load the 0.25-degree Aurora 1.5 checkpoint."""
+    if model_key not in MODEL_CONFIGS:
+        raise ValueError(
+            f"Unknown model_key {model_key!r}. Expected one of {tuple(MODEL_CONFIGS)}."
+        )
+    ckpt_name = str(MODEL_CONFIGS[model_key]["checkpoint"])
+    model = AuroraV1p5()
+    model.load_checkpoint("microsoft/aurora", ckpt_name, revision="main")
+    model.eval()
+    return model
+
+
+def _append_metric_rows(
+    results: list[dict],
+    metrics: dict[str, float],
+    *,
+    case_id: int,
+    forecast_source: str,
+    model_family: str,
+    init_time: pd.Timestamp,
+    valid_time: pd.Timestamp,
+    lead_hours: int,
+    year: int,
+) -> None:
+    """Append one row per verification metric in standard EWB schema."""
+    oos_flag = (
+        True
+        if model_family in ("HRES", "Persistence")
+        else year > int(MODEL_CONFIGS["v1p5"]["cutoff_year"])
+    )
+    for metric_name, val in metrics.items():
+        results.append(
+            {
+                "value": val,
+                "lead_time": lead_hours,
+                "init_time": init_time,
+                "valid_time": valid_time,
+                "target_variable": "surface_air_temperature",
+                "metric": metric_name,
+                "forecast_source": forecast_source,
+                "target_source": "ERA5",
+                "case_id_number": case_id,
+                "event_type": "heat_wave",
+                "forecast_variable": "surface_air_temperature",
+                "model_family": model_family,
+                "year": year,
+                "is_out_of_sample": oos_flag,
+            }
+        )
+
+
 # =============================================================================
 # Section 1: Forecast Generation
 # =============================================================================
@@ -269,7 +333,7 @@ def generate_insample_heatwave_forecasts(
     models: Sequence[str] = DEFAULT_MODELS,
     years: Sequence[int] = DEFAULT_YEARS,
     start_leads: Sequence[int] = DEFAULT_START_LEADS,
-    cache_dir: str | Path = PRETRAINED_CACHE_DIR,
+    cache_dir: str | Path = V1P5_CACHE_DIR,
     max_cases: int | None = None,
 ) -> None:
     """
@@ -298,7 +362,7 @@ def generate_insample_heatwave_forecasts(
             aligned_start = align_to_synoptic_12h(case.start_date)
             event_end = pd.to_datetime(case.end_date)
             for start_lead in start_leads:
-                init_time = aligned_start - pd.Timedelta(hours=int(start_lead))
+                init_time = aligned_start - timedelta(hours=int(start_lead))
                 out_file = forecast_filename(
                     output_path, model_key, init_time, int(start_lead), case.case_id_number
                 )
@@ -325,7 +389,7 @@ def generate_insample_heatwave_forecasts(
         return
 
     data_pipeline = AuroraDataLoader(
-        cache_dir=Path(cache_dir), pretrained_only=True, res=0.25
+        cache_dir=Path(cache_dir), pretrained_only=False, res=0.25
     )
 
     for model_key, grouped_by_init in pending_by_model.items():
@@ -361,7 +425,6 @@ def generate_insample_heatwave_forecasts(
                     forecast_steps=0,
                     bbox=None,
                 )
-                input_batch = filter_batch_for_pretrained(input_batch)
 
                 active_buffers: dict[int, list[xr.Dataset]] = {
                     idx: [] for idx in range(len(jobs))
@@ -376,7 +439,7 @@ def generate_insample_heatwave_forecasts(
                     )
                 ):
                     lead_hours = (step_idx + 1) * 6
-                    valid_time = init_time + pd.Timedelta(hours=lead_hours)
+                    valid_time = init_time + timedelta(hours=lead_hours)
 
                     matching_indices = [
                         idx
@@ -543,7 +606,7 @@ def evaluate_insample_heatwaves(
 
         for start_lead in start_leads:
             start_lead = int(start_lead)
-            init_t = aligned_start - pd.Timedelta(hours=start_lead)
+            init_t = aligned_start - timedelta(hours=start_lead)
 
             model_files: list[tuple[str, Path]] = []
             for model_key in models:
@@ -617,9 +680,8 @@ def evaluate_insample_heatwaves(
                 file_init_t = pd.to_datetime(aurora_fcst.init_time.values[0])
 
                 for lt in aurora_fcst.lead_time.values:
-                    lt_td = pd.to_timedelta(lt)
-                    lt_hours = int(lt_td.total_seconds() / 3600)
-                    valid_time = file_init_t + lt_td
+                    lt_hours = timedelta_to_hours(lt)
+                    valid_time = file_init_t + timedelta(hours=lt_hours)
 
                     if not (aligned_start <= valid_time <= end_dt):
                         continue
@@ -789,8 +851,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--cache-dir",
         type=Path,
-        default=PRETRAINED_CACHE_DIR,
-        help="Isolated ERA5 cache directory for pretrained_only=True inputs.",
+        default=V1P5_CACHE_DIR,
+        help="ERA5 cache directory for Aurora 1.5 (18 surface vars) inputs.",
     )
     parser.add_argument(
         "--max-cases",

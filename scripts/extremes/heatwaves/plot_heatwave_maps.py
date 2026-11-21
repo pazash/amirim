@@ -14,7 +14,7 @@ warnings.filterwarnings("ignore")
 
 # Import evaluator functions
 sys.path.append(str(Path(__file__).resolve().parents[3]))
-from src.utils import load_era5_zarr, load_hres_zarr, standardize_longitude
+from src.utils import load_era5_zarr, load_hres_zarr, standardize_longitude, timedelta_to_hours
 
 def main():
     base_dir = Path(__file__).resolve().parents[3]
@@ -100,7 +100,7 @@ def main():
             
         for lt in aurora_fcst.lead_time.values:
             valid_time = init_t + lt
-            lt_hours = int(pd.Timedelta(lt).total_seconds() / 3600)
+            lt_hours = timedelta_to_hours(lt)
             
             # Check if valid_time is within the event period
             if pd.to_datetime(case.start_date) <= pd.to_datetime(valid_time) <= pd.to_datetime(case.end_date):
@@ -153,7 +153,7 @@ def main():
                 ax.add_feature(cfeature.BORDERS, linestyle=':')
                 if has_hres:
                     hres_lt = valid_time - hres_init_t
-                    hres_lt_hours = int(pd.Timedelta(hres_lt).total_seconds() / 3600)
+                    hres_lt_hours = timedelta_to_hours(hres_lt)
                     try:
                         fcst_2d_hres = hres_fcst["surface_air_temperature"].sel(lead_time=hres_lt_hours)
                         hres_val = fcst_2d_hres.values - 273.15

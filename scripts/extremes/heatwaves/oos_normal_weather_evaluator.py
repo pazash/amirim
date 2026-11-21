@@ -47,6 +47,7 @@ import os
 import sys
 import warnings
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Sequence
 
@@ -72,6 +73,11 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", message="Mean of empty slice")
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="The 'generic' unit for NumPy timedelta is deprecated",
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
@@ -90,6 +96,7 @@ from src.utils import (
     peak_amplitude_error,
     rmse,
     standardize_longitude,
+    timedelta_to_hours,
 )
 
 logger = logging.getLogger(__name__)
@@ -429,8 +436,8 @@ def verify_and_select_normal_windows(
 
     min_init_bound = pd.Timestamp("2022-01-01 00:00:00")
     max_end_bound = pd.Timestamp("2022-12-31 18:00:00")
-    max_lead_td = pd.Timedelta(hours=max(DEFAULT_START_LEADS))
-    buffer_td = pd.Timedelta(days=min_buffer_days)
+    max_lead_td = timedelta(hours=max(DEFAULT_START_LEADS))
+    buffer_td = timedelta(days=min_buffer_days)
 
     for case in base_cases:
         hw_start = align_to_synoptic_12h(case.extreme_start_date)
@@ -447,11 +454,11 @@ def verify_and_select_normal_windows(
 
         season_start = max(
             min_init_bound + max_lead_td,
-            hw_start - pd.Timedelta(days=search_days),
+            hw_start - timedelta(days=search_days),
         )
         season_end = min(
             max_end_bound,
-            hw_end + pd.Timedelta(days=search_days),
+            hw_end + timedelta(days=search_days),
         )
 
         logger.info(
@@ -516,6 +523,10 @@ def verify_and_select_normal_windows(
         best_stats: dict[str, float] = {}
 
         for c_start in cand_starts:
+            # Enforce exact diurnal phase alignment (same UTC start hour as the extreme heatwave)
+            if c_start.hour != hw_start.hour:
+                continue
+
             c_end = c_start + duration
             if c_start - max_lead_td < min_init_bound or c_end > max_end_bound:
                 continue
@@ -743,7 +754,7 @@ def generate_oos_normal_forecasts(
             aligned_start = align_to_synoptic_12h(case.start_date)
             event_end = pd.to_datetime(case.end_date)
             for start_lead in start_leads:
-                init_time = aligned_start - pd.Timedelta(hours=int(start_lead))
+                init_time = aligned_start - timedelta(hours=int(start_lead))
                 out_file = forecast_filename(
                     output_path,
                     model_key,
@@ -825,7 +836,7 @@ def generate_oos_normal_forecasts(
                     )
                 ):
                     lead_hours = (step_idx + 1) * 6
-                    valid_time = init_time + pd.Timedelta(hours=lead_hours)
+                    valid_time = init_time + timedelta(hours=lead_hours)
 
                     matching_indices = [
                         idx
@@ -1035,7 +1046,7 @@ def evaluate_oos_normal(
 
         for start_lead in start_leads:
             start_lead = int(start_lead)
-            init_t = aligned_start - pd.Timedelta(hours=start_lead)
+            init_t = aligned_start - timedelta(hours=start_lead)
 
             model_files: list[tuple[str, Path]] = []
             for model_key in models:
@@ -1118,9 +1129,8 @@ def evaluate_oos_normal(
                 file_init_t = pd.to_datetime(aurora_fcst.init_time.values[0])
 
                 for lt in aurora_fcst.lead_time.values:
-                    lt_td = pd.to_timedelta(lt)
-                    lt_hours = int(lt_td.total_seconds() / 3600)
-                    valid_time = file_init_t + lt_td
+                    lt_hours = timedelta_to_hours(lt)
+                    valid_time = file_init_t + timedelta(hours=lt_hours)
 
                     if not (aligned_start <= valid_time <= end_dt):
                         continue

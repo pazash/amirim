@@ -41,6 +41,7 @@ import math
 import os
 import sys
 import warnings
+from datetime import timedelta
 from pathlib import Path
 from typing import Sequence
 
@@ -59,6 +60,11 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", message="Mean of empty slice")
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="The 'generic' unit for NumPy timedelta is deprecated",
+)
 
 sys.path.append(str(Path(__file__).resolve().parents[3]))
 
@@ -77,6 +83,7 @@ from src.utils import (
     peak_amplitude_error,
     rmse,
     standardize_longitude,
+    timedelta_to_hours,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,7 +158,7 @@ def get_oos_heatwave_cases(
     Sorted deterministically by (start_date, case_id_number).
     """
     target_years = set(int(y) for y in years)
-    all_cases = ewb.load_cases()
+    all_cases = ewb.cases.load_cases()
     hw_cases = [
         c
         for c in all_cases
@@ -236,7 +243,7 @@ def generate_oos_heatwave_forecasts(
             aligned_start = align_to_synoptic_12h(case.start_date)
             event_end = pd.to_datetime(case.end_date)
             for start_lead in start_leads:
-                init_time = aligned_start - pd.Timedelta(hours=int(start_lead))
+                init_time = aligned_start - timedelta(hours=int(start_lead))
                 out_file = forecast_filename(
                     output_path, model_key, init_time, int(start_lead), case.case_id_number
                 )
@@ -315,7 +322,7 @@ def generate_oos_heatwave_forecasts(
                     )
                 ):
                     lead_hours = (step_idx + 1) * 6
-                    valid_time = init_time + pd.Timedelta(hours=lead_hours)
+                    valid_time = init_time + timedelta(hours=lead_hours)
 
                     matching_indices = [
                         idx
@@ -524,7 +531,7 @@ def evaluate_oos_heatwaves(
 
         for start_lead in start_leads:
             start_lead = int(start_lead)
-            init_t = aligned_start - pd.Timedelta(hours=start_lead)
+            init_t = aligned_start - timedelta(hours=start_lead)
 
             # Locate available Aurora forecast files strictly matching this case & lead
             model_files: list[tuple[str, Path]] = []
@@ -602,9 +609,8 @@ def evaluate_oos_heatwaves(
                 file_init_t = pd.to_datetime(aurora_fcst.init_time.values[0])
 
                 for lt in aurora_fcst.lead_time.values:
-                    lt_td = pd.to_timedelta(lt)
-                    lt_hours = int(lt_td.total_seconds() / 3600)
-                    valid_time = file_init_t + lt_td
+                    lt_hours = timedelta_to_hours(lt)
+                    valid_time = file_init_t + timedelta(hours=lt_hours)
 
                     if not (aligned_start <= valid_time <= end_dt):
                         continue

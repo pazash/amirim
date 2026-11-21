@@ -4,6 +4,7 @@ import os
 import re
 import sys
 import warnings
+from datetime import timedelta
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,11 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", message="Mean of empty slice")
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="The 'generic' unit for NumPy timedelta is deprecated",
+)
 
 # Use anonymous access for GCS (ERA5, HRES)
 os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "false"
@@ -40,6 +46,7 @@ from src.utils import (
     peak_amplitude_error,
     rmse,
     standardize_longitude,
+    timedelta_to_hours,
 )
 
 logger = logging.getLogger(__name__)
@@ -94,7 +101,7 @@ def generate_ar_forecasts(
         event_start = pd.to_datetime(case.start_date)
         event_end = pd.to_datetime(case.end_date)
         for start_lead in target_start_lead_times:
-            init_time = event_start - pd.Timedelta(hours=start_lead)
+            init_time = event_start - timedelta(hours=start_lead)
             filename = (
                 output_path
                 / f"aurora_ar_forecast_{init_time.strftime('%Y%m%d')}_L{start_lead}_full_event.nc"
@@ -333,7 +340,7 @@ def evaluate_atmospheric_rivers(
 
             for lt in aurora_fcst.lead_time.values:
                 valid_time = init_t + lt
-                lt_hours = int(pd.Timedelta(lt).total_seconds() / 3600)
+                lt_hours = timedelta_to_hours(lt)
 
                 # Only evaluate if valid_time is inside the case window
                 if start_dt <= pd.to_datetime(valid_time) <= end_dt:
@@ -386,9 +393,7 @@ def evaluate_atmospheric_rivers(
                     # 2. Evaluate matched HRES
                     if has_hres:
                         hres_lt = valid_time - hres_init_t
-                        hres_lt_hours = int(
-                            pd.Timedelta(hres_lt).total_seconds() / 3600
-                        )
+                        hres_lt_hours = timedelta_to_hours(hres_lt)
 
                         try:
                             if np.issubdtype(

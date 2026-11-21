@@ -114,6 +114,12 @@ def _clean_regime_df(
     if not active_groups:
         raise ValueError(f"No valid model groups found in {csv_path}.")
 
+    # Standardize timestamp strings before intersecting targets across models
+    df["init_dt"] = pd.to_datetime(df["init_time"], format="ISO8601")
+    df["valid_dt"] = pd.to_datetime(df["valid_time"], format="ISO8601")
+    df["init_time"] = df["init_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+    df["valid_time"] = df["valid_dt"].dt.strftime("%Y-%m-%d %H:%M:%S")
+
     key_cols = ["case_id_number", "init_time", "valid_time"]
     common_targets: pd.DataFrame | None = None
     for group in active_groups:
@@ -130,8 +136,6 @@ def _clean_regime_df(
     df = pd.merge(df, common_targets, on=key_cols, how="inner")
 
     # Derive exact onset start_lead_h per (case_id_number, init_time)
-    df["init_dt"] = pd.to_datetime(df["init_time"])
-    df["valid_dt"] = pd.to_datetime(df["valid_time"])
     case_starts = df.groupby("case_id_number")["valid_dt"].transform("min")
     df["start_lead_h"] = (
         (case_starts - df["init_dt"]).dt.total_seconds() / 3600.0
@@ -786,6 +790,238 @@ def generate_all_plots(
     logger.info(f"Saved plot suite to {output_dir.resolve()}")
 
 
+def generate_single_model_comparison_plots(
+    paired: pd.DataFrame,
+    aurora_model: str,
+    output_dir: Path,
+) -> None:
+    """
+    Generate clean, single-model ``compare_extreme_vs_normal.py``-style plots
+    and CSVs comparing one Aurora variant (*aurora_model*) against ECMWF HRES.
+    """
+    present_models = set(paired["model_group"].unique())
+    if aurora_model not in present_models:
+        logger.warning(f"Skipping single-model plots for {aurora_model}: not in paired data.")
+        return
+
+    has_hres = "ECMWF HRES" in present_models
+    order = [aurora_model, "ECMWF HRES"] if has_hres else [aurora_model]
+    palette = {m: MODEL_PALETTE[m] for m in order if m in MODEL_PALETTE}
+
+    sub = paired[paired["model_group"].isin(order)].copy()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. RMSE Aggregation
+    rmse_df = (
+        sub[sub["metric"] == "RootMeanSquaredError"]
+        .groupby(["model_group", "lead_time"], as_index=False)
+        .agg(
+            value_extreme=("value_extreme", "mean"),
+            value_normal=("value_normal", "mean"),
+        )
+    )
+    if rmse_df.empty:
+        logger.warning(f"No RMSE data for {aurora_model}; skipping single-model plots.")
+        return
+
+    rmse_df["rmse_ratio"] = rmse_df["value_extreme"] / rmse_df["value_normal"]
+    rmse_df["rmse_degradation_pct"] = (
+        (rmse_df["value_extreme"] - rmse_df["value_normal"])
+        / rmse_df["value_normal"]
+    ) * 100.0
+    rmse_df.to_csv(output_dir / "rmse_comparison.csv", index=False)
+
+    # 2. Peak Amplitude Error Aggregation
+    peak_df = (
+        sub[sub["metric"] == "Peak_Amplitude_Error"]
+        .groupby(["model_group", "lead_time"], as_index=False)
+        .agg(
+            value_extreme=("value_extreme", "mean"),
+            value_normal=("value_normal", "mean"),
+        )
+    )
+    if not peak_df.empty:
+        peak_df["peak_bias_diff"] = (
+            peak_df["value_extreme"] - peak_df["value_normal"]
+        )
+        peak_df.to_csv(output_dir / "peak_error_comparison.csv", index=False)
+
+    # Plot 1: RMSE Ratio (Extreme / Normal)
+    plt.figure(figsize=(10, 6))
+    sns.lineplot(
+        data=rmse_df,
+        x="lead_time",
+        y="rmse_ratio",
+        hue="model_group",
+        hue_order=order,
+        palette=palette,
+        marker="o",
+        linewidth=2,
+    )
+    plt.axhline(1.0, color="black", linestyle="--", alpha=0.6, label="Equal Performance")
+    plt.title(
+        f"RMSE Ratio (Extreme / Normal Weather) — {aurora_model} vs. HRES\n"
+        "Higher ratio = model struggles more with extremes",
+        fontsize=13,
+    )
+    plt.xlabel("Lead Time (Hours)", fontsize=12)
+    plt.ylabel("RMSE Ratio", fontsize=12)
+    plt.legend(title="Model")
+    plt.tight_layout()
+    plt.savefig(output_dir / "rmse_ratio.png", dpi=300)
+    plt.close()
+
+    # Plot 2: Peak Amplitude Error (Extreme vs Normal)
+    if not peak_df.empty:
+        peak_melt = pd.melt(
+            peak_df,
+            id_vars=["model_group", "lead_time"],
+            value_vars=["value_extreme", "value_normal"],
+            var_name="regime",
+            value_name="peak_error",
+        )
+        peak_melt["regime"] = peak_melt["regime"].replace(
+            {
+                "value_extreme": "Extreme (Heatwave)",
+                "value_normal": "Normal Weather",
+            }
+        )
+        plt.figure(figsize=(12, 6))
+        sns.lineplot(
+            data=peak_melt,
+            x="lead_time",
+            y="peak_error",
+            hue="model_group",
+            hue_order=order,
+            palette=palette,
+            style="regime",
+            style_order=["Extreme (Heatwave)", "Normal Weather"],
+            markers=True,
+            dashes=True,
+            linewidth=2,
+        )
+        plt.axhline(0.0, color="black", linestyle="-", alpha=0.3)
+        plt.title(
+            f"Mean Peak Amplitude Error (Forecast - Target) — {aurora_model} vs. HRES\n"
+            "Negative values indicate underprediction of peaks",
+            fontsize=13,
+        )
+        plt.xlabel("Lead Time (Hours)", fontsize=12)
+        plt.ylabel("Peak Error (K)", fontsize=12)
+        plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left", title="Model / Regime")
+        plt.tight_layout()
+        plt.savefig(output_dir / "peak_amplitude_error.png", dpi=300)
+        plt.close()
+
+    # Plot 3: Single Aurora Model RMSE (Normal vs Extreme)
+    aurora_rmse = rmse_df[rmse_df["model_group"] == aurora_model]
+    if not aurora_rmse.empty:
+        aurora_melt = pd.melt(
+            aurora_rmse,
+            id_vars=["lead_time"],
+            value_vars=["value_normal", "value_extreme"],
+            var_name="regime",
+            value_name="rmse",
+        )
+        aurora_melt["regime"] = aurora_melt["regime"].replace(
+            {
+                "value_normal": "Normal Weather",
+                "value_extreme": "Extreme (Heatwave)",
+            }
+        )
+        plt.figure(figsize=(10, 6))
+        sns.lineplot(
+            data=aurora_melt,
+            x="lead_time",
+            y="rmse",
+            hue="regime",
+            hue_order=["Normal Weather", "Extreme (Heatwave)"],
+            marker="o",
+            linewidth=2,
+        )
+        plt.title(f"{aurora_model} RMSE: Normal vs Extreme Weather", fontsize=14)
+        plt.xlabel("Lead Time (Hours)", fontsize=12)
+        plt.ylabel("RMSE (K)", fontsize=12)
+        plt.legend(title="Regime")
+        plt.tight_layout()
+        plt.savefig(output_dir / "aurora_rmse_normal_vs_extreme.png", dpi=300)
+        plt.close()
+
+    # Plot 4: Aurora vs HRES RMSE Difference (Normal vs Extreme)
+    if has_hres:
+        ext_piv = rmse_df.pivot(
+            index="lead_time", columns="model_group", values="value_extreme"
+        ).reset_index()
+        norm_piv = rmse_df.pivot(
+            index="lead_time", columns="model_group", values="value_normal"
+        ).reset_index()
+        if aurora_model in ext_piv.columns and "ECMWF HRES" in ext_piv.columns:
+            diff_df = pd.DataFrame(
+                {
+                    "lead_time": norm_piv["lead_time"],
+                    "Normal Weather": norm_piv[aurora_model] - norm_piv["ECMWF HRES"],
+                    "Extreme (Heatwave)": ext_piv[aurora_model] - ext_piv["ECMWF HRES"],
+                }
+            )
+            diff_melt = pd.melt(
+                diff_df,
+                id_vars=["lead_time"],
+                value_vars=["Normal Weather", "Extreme (Heatwave)"],
+                var_name="regime",
+                value_name="rmse_diff",
+            )
+            plt.figure(figsize=(10, 6))
+            sns.lineplot(
+                data=diff_melt,
+                x="lead_time",
+                y="rmse_diff",
+                hue="regime",
+                hue_order=["Normal Weather", "Extreme (Heatwave)"],
+                marker="o",
+                linewidth=2,
+            )
+            plt.axhline(0.0, color="black", linestyle="--", alpha=0.6, label="Equal Performance")
+            plt.title(
+                f"{aurora_model} vs ECMWF HRES RMSE Difference\n"
+                f"Negative values = {aurora_model} is better than HRES",
+                fontsize=13,
+            )
+            plt.xlabel("Lead Time (Hours)", fontsize=12)
+            plt.ylabel("RMSE Difference (Aurora - HRES, K)", fontsize=12)
+            plt.legend(title="Regime")
+            plt.tight_layout()
+            plt.savefig(output_dir / "aurora_vs_hres_rmse_diff.png", dpi=300)
+            plt.close()
+
+    # Plot 5: RMSE Percentage Degradation Bar Chart
+    plt.figure(figsize=(14, 6))
+    ax = sns.barplot(
+        data=rmse_df,
+        x="lead_time",
+        y="rmse_degradation_pct",
+        hue="model_group",
+        hue_order=order,
+        palette=palette,
+        alpha=0.88,
+    )
+    plt.axhline(0.0, color="black", linestyle="-", linewidth=1.4)
+    plt.title(
+        f"RMSE Percentage Degradation (Extreme vs Normal Weather) — {aurora_model} vs. HRES\n"
+        "How much higher is the error during heatwaves?",
+        fontsize=13,
+    )
+    plt.xlabel("Lead Time (Hours)", fontsize=12)
+    plt.ylabel("RMSE Degradation (%)", fontsize=12)
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=100))
+    ax.tick_params(axis="x", labelsize=9)
+    plt.legend(title="Model")
+    plt.tight_layout()
+    plt.savefig(output_dir / "rmse_percentage_degradation.png", dpi=300)
+    plt.close()
+
+    logger.info(f"Saved single-model comparison plots for {aurora_model} to {output_dir.resolve()}")
+
+
 def run_comparison(
     extreme_csv: str | Path = Path("oos_heatwave_evaluations.csv"),
     normal_csv: str | Path = Path("oos_normal_evaluations.csv"),
@@ -820,6 +1056,15 @@ def run_comparison(
         out_path / "with_persistence",
         include_persistence=True,
     )
+
+    for aurora_label, folder_name in (
+        ("Aurora 0.25 Finetuned", "aurora_finetuned"),
+        ("Aurora 0.25 Pretrained", "aurora_pretrained"),
+    ):
+        generate_single_model_comparison_plots(
+            paired, aurora_label, out_path / folder_name
+        )
+
     return tables
 
 

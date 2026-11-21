@@ -2,6 +2,7 @@ import os
 import re
 import warnings
 import logging
+from datetime import timedelta
 from pathlib import Path
 import sys
 import gc
@@ -23,6 +24,11 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", message="Mean of empty slice")
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="The 'generic' unit for NumPy timedelta is deprecated",
+)
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -43,6 +49,7 @@ from src.utils import (
     load_hres_zarr,
     align_and_subset_2d,
     aurora_batch_to_xarray,
+    timedelta_to_hours,
 )
 from aurora import AuroraV1p5
 
@@ -85,7 +92,7 @@ def generate_normal_forecasts(output_dir="normal_forecasts/"):
         normal_dates_list = get_normal_dates(case, all_hw_years)
         for normal_start, normal_end in normal_dates_list:
             for start_lead in target_start_lead_times:
-                init_time = normal_start - pd.Timedelta(hours=start_lead)
+                init_time = normal_start - timedelta(hours=start_lead)
                 filename = Path(output_dir) / f"aurora_hw_forecast_{init_time.strftime('%Y%m%d')}_L{start_lead}_full_event.nc"
                 if not filename.exists():
                     to_generate.append((case, normal_start, normal_end, start_lead, init_time, filename))
@@ -234,7 +241,7 @@ def evaluate_normal(output_csv: str = "normal_evaluations.csv"):
     
                 for lt in aurora_fcst.lead_time.values:
                     valid_time = init_t + lt
-                    lt_hours = int(pd.Timedelta(lt).total_seconds() / 3600)
+                    lt_hours = timedelta_to_hours(lt)
                     
                     if pd.to_datetime(normal_start) <= pd.to_datetime(valid_time) <= pd.to_datetime(normal_end):
                         try:
@@ -270,7 +277,7 @@ def evaluate_normal(output_csv: str = "normal_evaluations.csv"):
                             
                         if has_hres:
                             hres_lt = valid_time - hres_init_t
-                            hres_lt_hours = int(pd.Timedelta(hres_lt).total_seconds() / 3600)
+                            hres_lt_hours = timedelta_to_hours(hres_lt)
                             
                             try:
                                 fcst_2d_hres = hres_fcst["surface_air_temperature"].sel(lead_time=hres_lt_hours)

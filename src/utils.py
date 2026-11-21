@@ -13,11 +13,19 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import warnings
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
 import xarray as xr
+
+# Suppress NumPy 2.5+ generic timedelta64 DeprecationWarning triggered internally by pandas < 3.0.3
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="The 'generic' unit for NumPy timedelta is deprecated",
+)
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +95,16 @@ def extreme_area_ratio(
 # ============================================================
 # Data Conversion & Alignment
 # ============================================================
+
+
+def timedelta_to_hours(td) -> int:
+    """Convert a numpy/pandas/datetime timedelta to integer hours using explicit units."""
+    if isinstance(td, np.timedelta64):
+        return int(np.timedelta64(td, "s") / np.timedelta64(3600, "s"))
+    if hasattr(td, "total_seconds"):
+        return int(td.total_seconds() / 3600)
+    return int(np.timedelta64(td, "s") / np.timedelta64(3600, "s"))
+
 
 AR_IVT_LEVELS = (300, 400, 500, 600, 700, 850, 925, 1000)
 TCWV_LEVELS = (50, 100, 150, 200, 250, 300, 400, 500, 600, 700, 850, 925, 1000)
@@ -261,7 +279,7 @@ def aurora_batch_to_xarray(
 
     coords = {
         "init_time": [pd.to_datetime(init_time)],
-        "lead_time": pd.to_timedelta([f"{lead_time_hours}h"]),
+        "lead_time": pd.to_timedelta([int(lead_time_hours)], unit="h"),
         "latitude": lats,
         "longitude": lons,
     }

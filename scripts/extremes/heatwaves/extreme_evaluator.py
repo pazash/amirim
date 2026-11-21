@@ -3,6 +3,7 @@ import os
 os.environ["GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT"] = "false"
 # 2. Force anonymous access globally
 os.environ["GCSFS_TOKEN"] = "anon"
+from datetime import timedelta
 import xarray as xr
 import pandas as pd
 import numpy as np
@@ -45,7 +46,7 @@ def generate_heatwave_forecasts(output_dir="ewb_forecasts/"):
         
         for start_lead in target_start_lead_times:
             # Initialize the model `start_lead` hours before the event begins
-            init_time = event_start - pd.Timedelta(hours=start_lead)
+            init_time = event_start - timedelta(hours=start_lead)
             
             filename = Path(output_dir) / f"aurora_hw_forecast_{init_time.strftime('%Y%m%d')}_L{start_lead}_full_event.nc"
             

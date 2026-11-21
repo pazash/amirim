@@ -26,6 +26,7 @@ sns.set_theme(style="whitegrid")
 plt.rcParams["figure.figsize"] = (10, 6)
 
 MODEL_DISPLAY_NAMES: dict[str, str] = {
+    "aurora_v1p5": "Aurora V1.5",
     "aurora_pretrained": "Aurora 0.25 Pretrained",
     "aurora_finetuned": "Aurora 0.25 Finetuned",
     "HRES": "ECMWF HRES",
@@ -33,6 +34,7 @@ MODEL_DISPLAY_NAMES: dict[str, str] = {
 }
 
 MODEL_ORDER: list[str] = [
+    "Aurora V1.5",
     "Aurora 0.25 Pretrained",
     "Aurora 0.25 Finetuned",
     "ECMWF HRES",
@@ -40,6 +42,7 @@ MODEL_ORDER: list[str] = [
 ]
 
 MODEL_PALETTE: dict[str, str] = {
+    "Aurora V1.5": "#9467bd",
     "Aurora 0.25 Pretrained": "#1f77b4",
     "Aurora 0.25 Finetuned": "#2ca02c",
     "ECMWF HRES": "#d62728",

@@ -16,6 +16,11 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
 warnings.filterwarnings("ignore", message="All-NaN slice encountered")
 warnings.filterwarnings("ignore", message="Mean of empty slice")
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message="The 'generic' unit for NumPy timedelta is deprecated",
+)
 
 import extremeweatherbench as ewb
 
@@ -31,6 +36,7 @@ from src.utils import (
     load_era5_zarr,
     load_hres_zarr,
     align_and_subset_2d,
+    timedelta_to_hours,
 )
 
 logger = logging.getLogger(__name__)
@@ -149,7 +155,7 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
                 valid_time = init_t + lt
                 
                 # Convert lead_time to total hours as an integer
-                lt_hours = int(pd.Timedelta(lt).total_seconds() / 3600)
+                lt_hours = timedelta_to_hours(lt)
                 
                 # Only evaluate if valid_time is inside the case window
                 if pd.to_datetime(case.start_date) <= pd.to_datetime(valid_time) <= pd.to_datetime(case.end_date):
@@ -189,7 +195,7 @@ def evaluate_heatwaves(output_csv: str = "heatwave_evaluations.csv"):
                     if has_hres:
                         # Determine the required HRES lead time to reach this valid_time
                         hres_lt = valid_time - hres_init_t
-                        hres_lt_hours = int(pd.Timedelta(hres_lt).total_seconds() / 3600)
+                        hres_lt_hours = timedelta_to_hours(hres_lt)
                         
                         try:
                             # Try to get the exact matching valid_time from HRES

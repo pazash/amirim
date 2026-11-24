@@ -505,7 +505,8 @@ def _extract_variable_2d(
     source_kind: str,
 ) -> xr.DataArray:
     """
-    Extract a 2D spatial DataArray for *var_cfg* from a time/lead-sliced Dataset.
+    Extract a 2D spatial DataArray (ordered ``latitude, longitude``) for
+    *var_cfg* from a time/lead-sliced Dataset.
 
     ``source_kind`` must be ``"aurora"`` or ``"reanalysis"`` (ERA5 / HRES).
     """
@@ -520,16 +521,15 @@ def _extract_variable_2d(
                 if "2m_temperature" in ds.data_vars
                 else "surface_air_temperature"
             )
-        return ds[key].squeeze(drop=True)
-
-    level = int(var_cfg["level"])
-    if kind == "atmos":
+        da = ds[key].squeeze(drop=True)
+    elif kind == "atmos":
+        level = int(var_cfg["level"])
         key = str(
             var_cfg["aurora_key"] if source_kind == "aurora" else var_cfg["era5_key"]
         )
-        return ds[key].sel(level=level).squeeze(drop=True)
-
-    if kind == "wind_speed":
+        da = ds[key].sel(level=level).squeeze(drop=True)
+    elif kind == "wind_speed":
+        level = int(var_cfg["level"])
         u_key, v_key = (
             ("u", "v")
             if source_kind == "aurora"
@@ -537,9 +537,11 @@ def _extract_variable_2d(
         )
         u_da = ds[u_key].sel(level=level).squeeze(drop=True)
         v_da = ds[v_key].sel(level=level).squeeze(drop=True)
-        return np.hypot(u_da, v_da)
+        da = np.hypot(u_da, v_da)
+    else:
+        raise ValueError(f"Unsupported variable kind: {kind!r}")
 
-    raise ValueError(f"Unsupported variable kind: {kind!r}")
+    return da.transpose("latitude", "longitude")
 
 
 def compute_region_metrics(
@@ -1013,7 +1015,12 @@ def evaluate_oos_heatwave_multivar(
                     except KeyError:
                         continue
 
-                    tgt_2t_vals = era5_step["2m_temperature"].squeeze().values
+                    tgt_2t_vals = (
+                        era5_step["2m_temperature"]
+                        .squeeze(drop=True)
+                        .transpose("latitude", "longitude")
+                        .values
+                    )
                     if np.isnan(tgt_2t_vals).all():
                         continue
                     q90_2t = float(np.nanpercentile(tgt_2t_vals, 90.0))
